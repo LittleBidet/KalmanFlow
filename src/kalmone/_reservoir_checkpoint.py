@@ -5,6 +5,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from math import isfinite
 
 import numpy as np
@@ -17,10 +18,9 @@ from .pipeline import (
 )
 from .time_utils import to_utc
 
-_FORMAT_VERSION = 1
+_FORMAT_VERSION = 2
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-_MICROSECONDS_PER_SECOND = 1_000_000
-_SECONDS_PER_DAY = 86_400
+_MICROSECOND = timedelta(microseconds=1)
 
 
 @dataclass(frozen=True)
@@ -35,23 +35,21 @@ class _Reader:
     """Bounds-checked reader for the private binary checkpoint layout."""
 
     def __init__(self, data: bytes) -> None:
-        self._data = data
-        self._position = 0
+        self._stream = BytesIO(data)
+        self._size = len(data)
 
     @property
     def remaining(self) -> int:
         """Number of unread bytes."""
 
-        return len(self._data) - self._position
+        return self._size - self._stream.tell()
 
     def read(self, size: int) -> bytes:
         """Read exactly ``size`` bytes or reject a truncated checkpoint."""
 
         if size < 0 or self.remaining < size:
             raise ValueError("truncated reservoir checkpoint")
-        start = self._position
-        self._position += size
-        return self._data[start : start + size]
+        return self._stream.read(size)
 
     def read_byte(self) -> int:
         """Read one unsigned byte."""
@@ -86,14 +84,7 @@ def encode_reservoir_checkpoint(
         result.extend(_pack_float(first.discharge))
     elif phase is PipelineInitializationPhase.REPLAY_FROM_INITIALIZATION:
         observations = state.unfinished_observations
-        result.extend(_encode_varint(len(observations)))
-        assert state.last_input_timestamp is not None
-        result.extend(
-            _encode_observations_from_last(
-                observations,
-                state.last_input_timestamp,
-            )
-        )
+        result.extend(_encode_observations_from_first(observations))
     elif phase is PipelineInitializationPhase.REPLAY_FROM_ANCHOR:
         anchor = state.filter_anchor
         observations = state.unfinished_observations
@@ -131,11 +122,7 @@ def decode_reservoir_checkpoint(
             discharge=_unpack_float(reader),
         )
     elif phase is PipelineInitializationPhase.REPLAY_FROM_INITIALIZATION:
-        assert last_input_timestamp is not None
-        unfinished_observations = _decode_observations_from_last(
-            reader,
-            last_input_timestamp,
-        )
+        unfinished_observations = _decode_observations_from_first(reader)
     elif phase is PipelineInitializationPhase.REPLAY_FROM_ANCHOR:
         filter_anchor = _decode_anchor(reader)
         unfinished_observations = _decode_observations(reader, filter_anchor.timestamp)
@@ -229,45 +216,25 @@ def _decode_observations(
     return tuple(observations)
 
 
-def _encode_observations_from_last(
+def _encode_observations_from_first(
     observations: tuple[InitializationObservation, ...],
-    last_timestamp: datetime,
 ) -> bytes:
-    """Encode start-up observations backwards from the required last timestamp.
+    """Encode start-up observations forward from their first timestamp."""
 
-    Before an anchor exists, the explicit last-input timestamp provides the
-    only compact absolute base needed for unsigned deltas. The records are
-    reversed again during restoration before they reach the pipeline.
-    """
-
-    result = bytearray()
-    previous_timestamp = last_timestamp
-    for observation in reversed(observations):
-        current_timestamp = observation.timestamp
-        delta = _timestamp_to_microseconds(
-            previous_timestamp
-        ) - _timestamp_to_microseconds(current_timestamp)
-        _encode_observation(result, observation, delta)
-        previous_timestamp = current_timestamp
-    return bytes(result)
+    assert observations
+    return (
+        _pack_timestamp(observations[0].timestamp)
+        + _encode_varint(len(observations))
+        + _encode_observations(observations, observations[0].timestamp)
+    )
 
 
-def _decode_observations_from_last(
+def _decode_observations_from_first(
     reader: _Reader,
-    last_timestamp: datetime,
 ) -> tuple[InitializationObservation, ...]:
-    """Decode reverse-ordered start-up observations into chronological order."""
+    """Decode forward-ordered start-up observations."""
 
-    reverse_observations: list[InitializationObservation] = []
-    previous_timestamp = last_timestamp
-    for _ in range(_decode_observation_count(reader)):
-        delta = _decode_varint(reader)
-        timestamp = _timestamp_from_microseconds(
-            _timestamp_to_microseconds(previous_timestamp) - delta
-        )
-        reverse_observations.append(_decode_observation(reader, timestamp))
-        previous_timestamp = timestamp
-    return tuple(reversed(reverse_observations))
+    return _decode_observations(reader, _unpack_timestamp(reader))
 
 
 def _encode_observation(
@@ -330,17 +297,14 @@ def _unpack_timestamp(reader: _Reader) -> datetime:
 def _timestamp_to_microseconds(timestamp: datetime) -> int:
     """Convert an aware datetime to an exact UTC microsecond count."""
 
-    elapsed = to_utc(timestamp) - _EPOCH
-    return (
-        elapsed.days * _SECONDS_PER_DAY + elapsed.seconds
-    ) * _MICROSECONDS_PER_SECOND + elapsed.microseconds
+    return (to_utc(timestamp) - _EPOCH) // _MICROSECOND
 
 
 def _timestamp_from_microseconds(value: int) -> datetime:
     """Convert an exact UTC microsecond count to an aware datetime."""
 
     try:
-        return _EPOCH + timedelta(microseconds=value)
+        return _EPOCH + value * _MICROSECOND
     except OverflowError as error:
         raise ValueError("checkpoint timestamp is out of range") from error
 
