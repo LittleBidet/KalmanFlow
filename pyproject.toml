@@ -1,0 +1,67 @@
+[project]
+name = "kalmone"
+version = "0.1.0"
+description = "Kalman filtering and fixed-lag smoothing for reservoir inflow estimation."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "numpy>=2.4.6",
+    "pandas>=3.0.5",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+tuning = [
+    "scipy",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.21,<0.12"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.15.17",
+]
+notebook = [
+    "jupyter",
+    "matplotlib",
+    "plotly",
+    "scipy",
+]
+
+[tool.uv.build-backend]
+source-exclude = [
+    "/src/kalmone/.DS_Store",
+    "/.pytest_cache",
+    "/.ruff_cache",
+    "/.uv-cache",
+    "/.venv",
+    "/build",
+    "/dist",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+extend-exclude = [
+    ".uv-cache",
+    ".venv",
+    "build",
+    "dist",
+]
+line-length = 88
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]
