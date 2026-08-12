@@ -81,15 +81,3 @@ class UnitSystem:
             raise ValueError("elapsed_seconds must be positive and finite")
         return volume_value / elapsed / self.flow_to_volume_per_second
 
-    def volume_rate_to_flow(
-        self, volume_per_interval: float, interval_seconds: float
-    ) -> float:
-        """Backward-compatible alias for :meth:`volume_to_flow_rate`."""
-
-        volume = float(volume_per_interval)
-        interval = float(interval_seconds)
-        if not isfinite(volume):
-            raise ValueError("volume_per_interval must be finite")
-        if not isfinite(interval) or interval <= 0.0:
-            raise ValueError("interval_seconds must be positive and finite")
-        return self.volume_to_flow_rate(volume, interval)

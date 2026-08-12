@@ -11,7 +11,6 @@ import numpy.testing as npt
 import pytest
 
 from kalmone import (
-    Observation,
     OnlineFixedLagRTS,
     OnlineInflowPipeline,
     ReservoirBackend,
@@ -213,18 +212,6 @@ class TestPipelineStateTransitions:
         assert update.filtered_state is not None
         assert update.filtered_state.timestamp == start + timedelta(minutes=30)
         assert np.isfinite(update.filtered_state.filtered_mean).all()
-
-    def test_process_observation_delegates_to_process(self) -> None:
-        start = datetime(2024, 1, 1, tzinfo=UTC)
-        pipeline = _reservoir_pipeline()
-
-        update = pipeline.process_observation(
-            Observation(timestamp=start, storage=100.0, discharge=4.0)
-        )
-
-        assert update.filtered_state is None
-        assert pipeline.initialized is False
-
 
 class TestPipelineTimestampBoundaries:
     """BVA: timestamp ordering and timezone boundaries."""

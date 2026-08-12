@@ -95,10 +95,6 @@ class TestReservoirModelBoundaries:
         with pytest.raises(ValueError, match="positive semidefinite"):
             _model(q_continuous=not_psd)
 
-    def test_from_config_builds_model(self) -> None:
-        model = ReservoirStateSpaceModel.from_config(_config())
-        npt.assert_allclose(model.q_continuous, Q)
-
     def test_negative_flow_rate_is_allowed_for_conversion(self) -> None:
         model = _model()
         assert model.discharge_volume(-4.0, 900.0) < 0.0

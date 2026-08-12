@@ -57,6 +57,24 @@ paths honor the configuration's initial covariance, unit system, noise
 covariances, and smoothing lag. The scalar-parameter batch API remains the
 convenience path for the default acre-ft/cfs model.
 
+Configured streams can be resumed with compact trusted checkpoints. A
+checkpoint belongs to exactly one `reservoir_id`; restoration rejects a
+configuration for another reservoir but otherwise relies on the caller to use
+a compatible configuration. Checkpoints are separate from output processing:
+
+```python
+stream = OnlineReservoirInflow.from_checkpoint(checkpoint, config=config)
+update = stream.process(observation)
+checkpoint = stream.checkpoint()
+```
+
+Use `stream.process_many(observations)` when an ordered group should be
+accepted atomically. It returns the same updates as individual `process` calls
+and restores the entry state if any observation fails. Applications serving
+multiple reservoirs should keep independent configured streams, for example
+`dict[str, OnlineReservoirInflow]`. The batch APIs do not accept or create
+checkpoints.
+
 `OnlineInflowPipeline` is the streaming API. Each `process` call returns a
 `PipelineUpdate`:
 

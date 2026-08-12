@@ -85,13 +85,6 @@ class ReservoirStateSpaceModel:
         object.__setattr__(self, "q_continuous", q)
         object.__setattr__(self, "unit_system", units)
 
-    @classmethod
-    def from_config(cls, config: object) -> ReservoirStateSpaceModel:
-        """Build the physical-rate model from a reservoir configuration."""
-
-        unit_system = getattr(config, "unit_system", UnitSystem.us_customary())
-        return cls(q_continuous=config.q, unit_system=unit_system)
-
     @property
     def observation_matrix(self) -> Array:
         """Describe the storage and outflow measurements used by the model."""

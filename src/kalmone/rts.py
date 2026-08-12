@@ -28,9 +28,7 @@ class SmoothedStep:
     def __post_init__(self) -> None:
         prediction_flag = OutputFlag(self.prediction_flag)
         if prediction_flag not in {OutputFlag.NORMAL, OutputFlag.PREDICTED}:
-            raise ValueError(
-                "SmoothedStep prediction_flag must be NORMAL or PREDICTED"
-            )
+            raise ValueError("SmoothedStep prediction_flag must be NORMAL or PREDICTED")
         smoothing_flag = OutputFlag(self.smoothing_flag)
         if smoothing_flag is not OutputFlag.SMOOTHED:
             raise ValueError("SmoothedStep smoothing_flag must be SMOOTHED")
@@ -146,6 +144,7 @@ class OnlineFixedLagRTS:
         )
         self._lag = lag
         self._steps: deque[FilterStep] = deque(maxlen=window_size)
+        self._last_finalized_steps: tuple[FilterStep, ...] = ()
 
     @property
     def lag(self) -> timedelta:
@@ -164,8 +163,13 @@ class OnlineFixedLagRTS:
         """The maximum number of filter steps kept in memory."""
 
         maxlen = self._steps.maxlen
-        assert maxlen is not None
-        return maxlen
+        return int(maxlen)
+
+    @property
+    def last_finalized_steps(self) -> tuple[FilterStep, ...]:
+        """Forward-filter steps released by the most recent :meth:`add_step`."""
+
+        return self._last_finalized_steps
 
     def add_step(self, step: FilterStep) -> tuple[SmoothedStep, ...]:
         """Add a filter step and return any newly finalized estimates.
@@ -194,10 +198,12 @@ class OnlineFixedLagRTS:
                     "a state finalized"
                 )
             self._steps.append(step)
+            self._last_finalized_steps = ()
             return ()
 
         smoothed = smooth_filter_steps(active)
         finalized = smoothed[:eligible_count]
+        self._last_finalized_steps = active[:eligible_count]
         self._steps.clear()
         self._steps.extend(active[eligible_count:])
         return finalized
@@ -206,3 +212,14 @@ class OnlineFixedLagRTS:
         """Return lag-window estimates without finalizing or retaining copies."""
 
         return smooth_filter_steps(self._steps)
+
+    def active_steps(self) -> tuple[FilterStep, ...]:
+        """Return active forward-filter steps in timestamp order."""
+
+        return tuple(self._steps)
+
+    def clear(self) -> None:
+        """Discard all active forward-filter steps."""
+
+        self._steps.clear()
+        self._last_finalized_steps = ()

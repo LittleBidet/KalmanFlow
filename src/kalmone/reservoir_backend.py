@@ -10,9 +10,8 @@ import numpy as np
 
 from ._validation import covariance_array
 from .kalman import initial_filter_step, kalman_step
-from .models import ReservoirStateSpaceModel, StateSpaceModel
+from .models import StateSpaceModel
 from .pipeline import InitializationObservation
-from .reservoir_config import ReservoirConfig
 from .time_utils import elapsed_seconds
 
 
@@ -42,18 +41,6 @@ class ReservoirBackend:
         )
         object.__setattr__(self, "initial_covariance", initial_covariance)
         object.__setattr__(self, "observation_covariance", observation_covariance)
-
-    @classmethod
-    def from_config(cls, config: ReservoirConfig) -> ReservoirBackend:
-        """Build a backend from one validated reservoir configuration."""
-
-        if not isinstance(config, ReservoirConfig):
-            raise TypeError("config must be a ReservoirConfig instance")
-        return cls(
-            model=ReservoirStateSpaceModel.from_config(config),
-            initial_covariance=config.p0,
-            observation_covariance=config.r,
-        )
 
     def initialize(
         self,

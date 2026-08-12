@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Final
 
 import numpy as np
 import pandas
 
+from ._reservoir_checkpoint import (
+    decode_reservoir_checkpoint,
+    encode_reservoir_checkpoint,
+)
 from .flags import OutputFlag
 from .models import ReservoirStateSpaceModel
 from .pipeline import ObservationLike, OnlineInflowPipeline
 from .reservoir_backend import ReservoirBackend
 from .reservoir_config import ReservoirConfig
 from .rts import OnlineFixedLagRTS
+from .time_utils import to_utc
+
+_UNSET: Final = object()
 
 
 @dataclass(frozen=True)
@@ -30,45 +39,16 @@ class ReservoirFlowEstimate:
             raise ValueError("timestamp must be timezone-aware")
         prediction_flag = OutputFlag(self.prediction_flag)
         if prediction_flag not in {OutputFlag.NORMAL, OutputFlag.PREDICTED}:
-            raise ValueError(
-                "prediction_flag must be NORMAL or PREDICTED"
-            )
+            raise ValueError("prediction_flag must be NORMAL or PREDICTED")
         smoothing_flag = OutputFlag(self.smoothing_flag)
         if smoothing_flag not in {
             OutputFlag.SMOOTHED,
             OutputFlag.NON_SMOOTHED,
         }:
-            raise ValueError(
-                "smoothing_flag must be SMOOTHED or NON_SMOOTHED"
-            )
+            raise ValueError("smoothing_flag must be SMOOTHED or NON_SMOOTHED")
         object.__setattr__(self, "value", float(self.value))
         object.__setattr__(self, "prediction_flag", prediction_flag)
         object.__setattr__(self, "smoothing_flag", smoothing_flag)
-
-    @property
-    def flag(self) -> OutputFlag:
-        """Backward-friendly short name for the prediction flag."""
-
-        return self.prediction_flag
-
-    @property
-    def output_flag(self) -> OutputFlag:
-        """Alias for the prediction flag used by output-oriented callers."""
-
-        return self.prediction_flag
-
-    @property
-    def output_flags(self) -> tuple[OutputFlag, OutputFlag]:
-        """Return prediction and smoothing flags in that order."""
-
-        return self.prediction_flag, self.smoothing_flag
-
-    @property
-    def flags(self) -> tuple[OutputFlag, OutputFlag]:
-        """Alias for :attr:`output_flags`."""
-
-        return self.output_flags
-
 
 @dataclass(frozen=True)
 class ReservoirFlowUpdate:
@@ -97,8 +77,14 @@ class OnlineReservoirInflow:
         r_outflow: float,
         smoothing_lag: timedelta = timedelta(hours=12),
         max_window_steps: int = 100_000,
+        reservoir_id: str | None = None,
     ) -> None:
-        """Create an estimator with the supplied noise settings."""
+        """Create an estimator with the supplied noise settings.
+
+        ``reservoir_id`` is optional. It is required only when creating a
+        checkpoint; callers using resumable streams should prefer
+        :meth:`from_config`.
+        """
 
         self._pipeline = _build_default_pipeline(
             q_storage=q_storage,
@@ -109,6 +95,9 @@ class OnlineReservoirInflow:
             smoothing_lag=smoothing_lag,
             max_window_steps=max_window_steps,
         )
+        self._reservoir_id = reservoir_id
+        self._processing = False
+        self._checkpoint_ready = False
 
     @classmethod
     def from_config(
@@ -124,6 +113,33 @@ class OnlineReservoirInflow:
             config,
             max_window_steps=max_window_steps,
         )
+        instance._reservoir_id = config.reservoir_id
+        instance._processing = False
+        instance._checkpoint_ready = False
+        return instance
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        checkpoint: bytes | bytearray | memoryview,
+        *,
+        config: ReservoirConfig,
+        max_window_steps: int = 100_000,
+    ) -> OnlineReservoirInflow:
+        """Restore one reservoir stream from a checkpoint.
+
+        Checkpoints deliberately contain no configuration fingerprint. The
+        supplied configuration must therefore be compatible with the stream;
+        only its reservoir identifier is checked here.
+        """
+
+        decoded = decode_reservoir_checkpoint(checkpoint)
+        if decoded.reservoir_id != config.reservoir_id:
+            raise ValueError(
+                "checkpoint reservoir_id does not match config.reservoir_id"
+            )
+        instance = cls.from_config(config, max_window_steps=max_window_steps)
+        instance._pipeline.restore_state(decoded.pipeline_state)
         return instance
 
     @property
@@ -138,29 +154,169 @@ class OnlineReservoirInflow:
 
         return self._pipeline.pending_count
 
-    def process_observation(self, observation: ObservationLike) -> ReservoirFlowUpdate:
-        """Process an object exposing timestamp, storage, and discharge."""
+    @property
+    def reservoir_id(self) -> str | None:
+        """Identifier bound to this stream, when it is checkpoint-capable."""
 
-        return self.process(
-            timestamp=observation.timestamp,
-            storage=observation.storage,
-            discharge=observation.discharge,
-        )
+        return self._reservoir_id
 
     def process(
         self,
+        observation: ObservationLike | None = None,
         *,
-        timestamp: datetime,
-        storage: float,
-        discharge: float,
+        timestamp: datetime | object = _UNSET,
+        storage: float | object = _UNSET,
+        discharge: float | object = _UNSET,
     ) -> ReservoirFlowUpdate:
-        """Process one observation and return currently available flow outputs."""
+        """Process one observation and return currently available flow outputs.
 
-        update = self._pipeline.process(
-            timestamp=timestamp,
-            storage=storage,
-            discharge=discharge,
+        An observation object may be supplied positionally, or the legacy
+        keyword ``timestamp``, ``storage``, and ``discharge`` arguments may be
+        used. Checkpoints become available only after this update is fully
+        constructed.
+        """
+
+        try:
+            values = _process_values_from_arguments(
+                observation,
+                timestamp=timestamp,
+                storage=storage,
+                discharge=discharge,
+            )
+        except Exception:
+            self._mark_preprocessing_failure()
+            raise
+        return self._process_one_value(values)
+
+    def process_many(
+        self, observations: Iterable[ObservationLike]
+    ) -> tuple[ReservoirFlowUpdate, ...]:
+        """Atomically process an ordered group of observations.
+
+        The returned updates are equivalent to calling :meth:`process` for
+        each input in order. If any input fails, the stream is restored to its
+        entry state and no partial group result is returned.
+        """
+
+        try:
+            values = tuple(
+                _process_values_from_observation(item) for item in observations
+            )
+        except Exception:
+            self._mark_preprocessing_failure()
+            raise
+        if not values:
+            return ()
+        return self._process_many_values(values)
+
+    def checkpoint(self) -> bytes:
+        """Return a compact checkpoint after a fully completed process call."""
+
+        if self._processing:
+            raise RuntimeError("cannot create a checkpoint while processing")
+        if not self._checkpoint_ready:
+            raise RuntimeError(
+                "cannot create a checkpoint before a successful process result"
+            )
+        if self._reservoir_id is None:
+            raise RuntimeError(
+                "checkpointing requires a reservoir_id; "
+                "use OnlineReservoirInflow.from_config"
+            )
+        return encode_reservoir_checkpoint(
+            self._reservoir_id,
+            self._pipeline.export_state(),
         )
+
+    def _process_many_values(
+        self,
+        values: tuple[tuple[datetime, float, float], ...],
+    ) -> tuple[ReservoirFlowUpdate, ...]:
+        """Process pre-extracted inputs transactionally and construct outputs."""
+
+        if self._processing:
+            raise RuntimeError("process calls may not be re-entered")
+        self._processing = True
+        self._checkpoint_ready = False
+        entry_state = None
+        try:
+            entry_state = self._pipeline.export_state()
+            self._validate_complete_order(values)
+            updates = tuple(
+                self._to_public_update(
+                    self._pipeline.process(
+                        timestamp=timestamp,
+                        storage=storage,
+                        discharge=discharge,
+                    )
+                )
+                for timestamp, storage, discharge in values
+            )
+        except Exception:
+            if entry_state is not None:
+                try:
+                    self._pipeline.restore_state(entry_state)
+                except Exception as rollback_error:
+                    raise RuntimeError(
+                        "processing failed and the stream could not be restored"
+                    ) from rollback_error
+            raise
+        else:
+            self._checkpoint_ready = True
+            return updates
+        finally:
+            self._processing = False
+
+    def _process_one_value(
+        self,
+        value: tuple[datetime, float, float],
+    ) -> ReservoirFlowUpdate:
+        """Process one observation without copying the active replay window."""
+
+        if self._processing:
+            raise RuntimeError("process calls may not be re-entered")
+        self._processing = True
+        self._checkpoint_ready = False
+        try:
+            timestamp, storage, discharge = value
+            update = self._to_public_update(
+                self._pipeline.process(
+                    timestamp=timestamp,
+                    storage=storage,
+                    discharge=discharge,
+                )
+            )
+            self._checkpoint_ready = True
+            return update
+        finally:
+            self._processing = False
+
+    def _validate_complete_order(
+        self,
+        values: tuple[tuple[datetime, float, float], ...],
+    ) -> None:
+        """Validate every timestamp before a multi-observation mutation begins."""
+
+        previous = self._pipeline.last_input_timestamp
+        for timestamp, _, _ in values:
+            if not isinstance(timestamp, datetime):
+                raise TypeError("timestamp must be a datetime instance")
+            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                raise ValueError("timestamp must be timezone-aware")
+            if previous is not None and to_utc(timestamp) <= to_utc(previous):
+                raise ValueError("observation timestamps must be strictly increasing")
+            previous = timestamp
+
+    def _mark_preprocessing_failure(self) -> None:
+        """Make a failed public process call ineligible for checkpointing."""
+
+        if not self._processing:
+            self._checkpoint_ready = False
+
+    @staticmethod
+    def _to_public_update(update) -> ReservoirFlowUpdate:
+        """Create public flow outputs before the stream becomes checkpointable."""
+
         return ReservoirFlowUpdate(
             filtered_inflows=tuple(
                 ReservoirFlowEstimate(
@@ -181,6 +337,34 @@ class OnlineReservoirInflow:
                 for state in update.smoothed_states
             ),
         )
+
+
+def _process_values_from_arguments(
+    observation: ObservationLike | None,
+    *,
+    timestamp: datetime | object,
+    storage: float | object,
+    discharge: float | object,
+) -> tuple[datetime, float, float]:
+    """Normalize the object and legacy-keyword forms of ``process``."""
+
+    if observation is not None:
+        if any(value is not _UNSET for value in (timestamp, storage, discharge)):
+            raise TypeError(
+                "pass either an observation object or timestamp, storage, and discharge"
+            )
+        return _process_values_from_observation(observation)
+    if any(value is _UNSET for value in (timestamp, storage, discharge)):
+        raise TypeError("process requires timestamp, storage, and discharge")
+    return timestamp, storage, discharge  # type: ignore[return-value]
+
+
+def _process_values_from_observation(
+    observation: ObservationLike,
+) -> tuple[datetime, float, float]:
+    """Extract structural observation fields without changing their values."""
+
+    return observation.timestamp, observation.storage, observation.discharge
 
 
 def get_reservoir_inflow(
@@ -286,18 +470,13 @@ def _build_default_pipeline(
 ) -> OnlineInflowPipeline:
     """Build the standard reservoir model and streaming pipeline."""
 
-    measurement_variances = np.asarray([r_storage, r_outflow], dtype=float)
-    if not np.all(np.isfinite(measurement_variances)) or np.any(
-        measurement_variances <= 0.0
-    ):
-        raise ValueError("measurement variances must be positive and finite")
     model = ReservoirStateSpaceModel(
         q_continuous=np.diag([q_storage, q_inflow, q_outflow]),
     )
     backend = ReservoirBackend(
         model=model,
         initial_covariance=np.diag([100.0, 1000.0, 1000.0]),
-        observation_covariance=np.diag(measurement_variances),
+        observation_covariance=np.diag([r_storage, r_outflow]),
     )
     return _build_pipeline(
         backend,
@@ -314,7 +493,14 @@ def _build_configured_pipeline(
     """Build a streaming pipeline without discarding validated config fields."""
 
     return _build_pipeline(
-        ReservoirBackend.from_config(config),
+        ReservoirBackend(
+            model=ReservoirStateSpaceModel(
+                q_continuous=config.q,
+                unit_system=config.unit_system,
+            ),
+            initial_covariance=config.p0,
+            observation_covariance=config.r,
+        ),
         smoothing_lag=config.smoothing_lag,
         max_window_steps=max_window_steps,
     )
@@ -416,18 +602,13 @@ def _estimates_to_array(
     values = np.full(len(index), np.nan, dtype=float)
     if not estimates:
         return values
-    try:
-        timestamps = pandas.DatetimeIndex(
-            [pandas.Timestamp(estimate.timestamp) for estimate in estimates]
-        )
-        estimate_values = np.asarray(
-            [float(estimate.value) for estimate in estimates],
-            dtype=float,
-        )
-    except (AttributeError, TypeError, ValueError) as error:
-        raise TypeError(
-            "reservoir flow estimates must expose timestamp and numeric value"
-        ) from error
+    timestamps = pandas.DatetimeIndex(
+        [pandas.Timestamp(estimate.timestamp) for estimate in estimates]
+    )
+    estimate_values = np.asarray(
+        [estimate.value for estimate in estimates],
+        dtype=float,
+    )
     positions = index.get_indexer(timestamps)
     if np.any(positions < 0):
         raise ValueError("pipeline returned a state outside the input index")

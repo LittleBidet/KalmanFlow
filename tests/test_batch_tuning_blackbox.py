@@ -153,7 +153,7 @@ class TestBatchAdapterPartitions:
     @pytest.mark.parametrize("r_storage", [0.0, -1.0, float("nan"), float("inf")])
     def test_invalid_measurement_variance_rejected(self, r_storage: float) -> None:
         storage, outflow = _aligned_series(count=2)
-        with pytest.raises(ValueError, match="measurement variances"):
+        with pytest.raises(ValueError, match="observation_covariance"):
             get_reservoir_inflow(
                 storage,
                 outflow,
