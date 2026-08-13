@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -14,12 +15,14 @@ from ._reservoir_checkpoint import (
     decode_reservoir_checkpoint,
     encode_reservoir_checkpoint,
 )
+from ._validation import bounded_integer
 from .flags import OutputFlag
+from .kalman import kalman_filter
 from .models import ReservoirStateSpaceModel
 from .pipeline import ObservationLike, OnlineInflowPipeline
 from .reservoir_backend import ReservoirBackend
 from .reservoir_config import ReservoirConfig
-from .rts import OnlineFixedLagRTS
+from .rts import OnlineFixedLagRTS, _rts_smooth_arrays
 from .time_utils import to_utc
 
 _UNSET: Final = object()
@@ -297,15 +300,18 @@ class OnlineReservoirInflow:
     ) -> None:
         """Validate every timestamp before a multi-observation mutation begins."""
 
-        previous = self._pipeline.last_input_timestamp
+        previous_utc = (
+            to_utc(self._pipeline.last_input_timestamp)
+            if self._pipeline.last_input_timestamp is not None
+            else None
+        )
         for timestamp, _, _ in values:
             if not isinstance(timestamp, datetime):
                 raise TypeError("timestamp must be a datetime instance")
-            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-                raise ValueError("timestamp must be timezone-aware")
-            if previous is not None and to_utc(timestamp) <= to_utc(previous):
+            timestamp_utc = to_utc(timestamp)
+            if previous_utc is not None and timestamp_utc <= previous_utc:
                 raise ValueError("observation timestamps must be strictly increasing")
-            previous = timestamp
+            previous_utc = timestamp_utc
 
     def _mark_preprocessing_failure(self) -> None:
         """Make a failed public process call ineligible for checkpointing."""
@@ -422,16 +428,20 @@ def get_reservoir_inflow(
     if not reservoir_storage.index.equals(reservoir_outflow.index):
         raise ValueError("storage and outflow indexes must match exactly")
 
-    stream = OnlineReservoirInflow(
+    backend = _build_default_backend(
         q_storage=q_storage,
         q_inflow=q_inflow,
         q_outflow=q_outflow,
         r_storage=r_storage,
         r_outflow=r_outflow,
+    )
+    return _run_batch(
+        reservoir_storage,
+        reservoir_outflow,
+        backend=backend,
         smoothing_lag=smoothing_lag,
         max_window_steps=max_window_steps,
     )
-    return _run_batch(reservoir_storage, reservoir_outflow, stream)
 
 
 def get_reservoir_inflow_from_config(
@@ -451,11 +461,13 @@ def get_reservoir_inflow_from_config(
     if not reservoir_storage.index.equals(reservoir_outflow.index):
         raise ValueError("storage and outflow indexes must match exactly")
 
-    stream = OnlineReservoirInflow.from_config(
-        config,
+    return _run_batch(
+        reservoir_storage,
+        reservoir_outflow,
+        backend=_build_configured_backend(config),
+        smoothing_lag=config.smoothing_lag,
         max_window_steps=max_window_steps,
     )
-    return _run_batch(reservoir_storage, reservoir_outflow, stream)
 
 
 def _build_default_pipeline(
@@ -470,13 +482,12 @@ def _build_default_pipeline(
 ) -> OnlineInflowPipeline:
     """Build the standard reservoir model and streaming pipeline."""
 
-    model = ReservoirStateSpaceModel(
-        q_continuous=np.diag([q_storage, q_inflow, q_outflow]),
-    )
-    backend = ReservoirBackend(
-        model=model,
-        initial_covariance=np.diag([100.0, 1000.0, 1000.0]),
-        observation_covariance=np.diag([r_storage, r_outflow]),
+    backend = _build_default_backend(
+        q_storage=q_storage,
+        q_inflow=q_inflow,
+        q_outflow=q_outflow,
+        r_storage=r_storage,
+        r_outflow=r_outflow,
     )
     return _build_pipeline(
         backend,
@@ -493,16 +504,41 @@ def _build_configured_pipeline(
     """Build a streaming pipeline without discarding validated config fields."""
 
     return _build_pipeline(
-        ReservoirBackend(
-            model=ReservoirStateSpaceModel(
-                q_continuous=config.q,
-                unit_system=config.unit_system,
-            ),
-            initial_covariance=config.p0,
-            observation_covariance=config.r,
-        ),
+        _build_configured_backend(config),
         smoothing_lag=config.smoothing_lag,
         max_window_steps=max_window_steps,
+    )
+
+
+def _build_default_backend(
+    *,
+    q_storage: float,
+    q_inflow: float,
+    q_outflow: float,
+    r_storage: float,
+    r_outflow: float,
+) -> ReservoirBackend:
+    """Build the default reservoir backend for either public adapter."""
+
+    return ReservoirBackend(
+        model=ReservoirStateSpaceModel(
+            q_continuous=np.diag([q_storage, q_inflow, q_outflow]),
+        ),
+        initial_covariance=np.diag([100.0, 1000.0, 1000.0]),
+        observation_covariance=np.diag([r_storage, r_outflow]),
+    )
+
+
+def _build_configured_backend(config: ReservoirConfig) -> ReservoirBackend:
+    """Build the validated reservoir backend for either public adapter."""
+
+    return ReservoirBackend(
+        model=ReservoirStateSpaceModel(
+            q_continuous=config.q,
+            unit_system=config.unit_system,
+        ),
+        initial_covariance=config.p0,
+        observation_covariance=config.r,
     )
 
 
@@ -527,114 +563,200 @@ def _build_pipeline(
 def _run_batch(
     reservoir_storage: pandas.Series,
     reservoir_outflow: pandas.Series,
-    stream: OnlineReservoirInflow,
-) -> pandas.DataFrame:
-    """Process aligned series through a configured stream."""
-
-    filtered_inflows: list[ReservoirFlowEstimate] = []
-    estimated_outflows: list[ReservoirFlowEstimate] = []
-    for timestamp, storage, discharge in zip(
-        reservoir_storage.index,
-        reservoir_storage.to_numpy(),
-        reservoir_outflow.to_numpy(),
-        strict=True,
-    ):
-        update = stream.process(
-            timestamp=timestamp,
-            storage=storage,
-            discharge=discharge,
-        )
-        filtered_inflows.extend(update.filtered_inflows)
-        estimated_outflows.extend(update.estimated_outflows)
-
-    return _estimates_to_frame(
-        reservoir_storage.index,
-        filtered_inflows=filtered_inflows,
-        estimated_outflows=estimated_outflows,
-    )
-
-
-def _estimates_to_frame(
-    index: pandas.DatetimeIndex,
     *,
-    filtered_inflows: list[ReservoirFlowEstimate],
-    estimated_outflows: list[ReservoirFlowEstimate],
+    backend: ReservoirBackend,
+    smoothing_lag: timedelta,
+    max_window_steps: int,
 ) -> pandas.DataFrame:
-    """Place timestamped flow estimates into a result DataFrame."""
+    """Run the reservoir batch kernel without streaming output objects."""
 
-    return pandas.DataFrame(
-        {
-            "estimated_inflow": _estimates_to_array(index, filtered_inflows),
-            "estimated_outflow": _estimates_to_array(index, estimated_outflows),
-            "estimated_inflow_flag": _estimate_flags_to_array(
-                index,
-                filtered_inflows,
-                field="prediction_flag",
-            ),
-            "estimated_outflow_flag": _estimate_flags_to_array(
-                index,
-                estimated_outflows,
-                field="prediction_flag",
-            ),
-            "estimated_inflow_smoothing_flag": _estimate_flags_to_array(
-                index,
-                filtered_inflows,
-                field="smoothing_flag",
-                default=OutputFlag.NON_SMOOTHED,
-            ),
-            "estimated_outflow_smoothing_flag": _estimate_flags_to_array(
-                index,
-                estimated_outflows,
-                field="smoothing_flag",
-                default=OutputFlag.NON_SMOOTHED,
-            ),
-        },
-        index=index,
+    return _process_reservoir_batch_raw(
+        reservoir_storage.index,
+        reservoir_storage.to_numpy(dtype=float),
+        reservoir_outflow.to_numpy(dtype=float),
+        backend=backend,
+        smoothing_lag=smoothing_lag,
+        max_window_steps=max_window_steps,
     )
 
 
-def _estimates_to_array(
+def _process_reservoir_batch_raw(
     index: pandas.DatetimeIndex,
-    estimates: list[ReservoirFlowEstimate],
-) -> np.ndarray:
-    """Map timestamped estimates to a dense array with one indexed lookup."""
+    storage: np.ndarray,
+    discharge: np.ndarray,
+    *,
+    backend: ReservoirBackend,
+    smoothing_lag: timedelta,
+    max_window_steps: int,
+) -> pandas.DataFrame:
+    """Estimate one complete reservoir series into dense NumPy result columns.
 
-    values = np.full(len(index), np.nan, dtype=float)
-    if not estimates:
-        return values
-    timestamps = pandas.DatetimeIndex(
-        [pandas.Timestamp(estimate.timestamp) for estimate in estimates]
+    This deliberately bypasses :class:`OnlineReservoirInflow`: that public
+    adapter constructs immutable updates for every source observation, whereas
+    batch callers need only dense, index-aligned result columns.
+    """
+
+    if smoothing_lag.total_seconds() <= 0.0:
+        raise ValueError("lag must be positive")
+    max_window_steps = bounded_integer(
+        max_window_steps,
+        name="max_window_steps",
+        minimum=2,
     )
-    estimate_values = np.asarray(
-        [estimate.value for estimate in estimates],
+    if len(index) != len(storage) or len(index) != len(discharge):
+        raise ValueError("batch inputs must have matching lengths")
+
+    _validate_batch_timestamps(index)
+    result = _empty_batch_columns(len(index))
+    first, second = _initialization_positions(storage, discharge)
+    if second is None:
+        return pandas.DataFrame(result, index=index)
+
+    positions = np.concatenate(
+        (np.array([first, second]), np.arange(second + 1, len(index)))
+    )
+    timestamps = index[positions]
+    observations = np.column_stack((storage[positions], discharge[positions]))
+    elapsed = np.asarray(
+        [
+            (timestamps[position] - timestamps[position - 1]).total_seconds()
+            for position in range(1, len(timestamps))
+        ],
         dtype=float,
     )
-    positions = index.get_indexer(timestamps)
-    if np.any(positions < 0):
-        raise ValueError("pipeline returned a state outside the input index")
-    values[positions] = estimate_values
-    return values
-
-
-def _estimate_flags_to_array(
-    index: pandas.DatetimeIndex,
-    estimates: list[ReservoirFlowEstimate],
-    *,
-    field: str,
-    default: OutputFlag | None = None,
-) -> np.ndarray:
-    """Map one estimate flag to a dense, indexed object array."""
-
-    values = np.full(len(index), None, dtype=object)
-    if default is not None:
-        values[:] = default.value
-    if not estimates:
-        return values
-    timestamps = pandas.DatetimeIndex(
-        [pandas.Timestamp(estimate.timestamp) for estimate in estimates]
+    transitions = np.asarray(
+        [backend.model.transition_matrix(seconds) for seconds in elapsed], dtype=float
     )
-    positions = index.get_indexer(timestamps)
-    if np.any(positions < 0):
-        raise ValueError("pipeline returned a state outside the input index")
-    values[positions] = [getattr(estimate, field).value for estimate in estimates]
-    return values
+    process_covariances = np.asarray(
+        [backend.model.process_covariance(seconds) for seconds in elapsed], dtype=float
+    )
+    initial_mean = np.array(
+        [
+            storage[first],
+            backend.model.initial_inflow(
+                storage[first], storage[second], discharge[first], elapsed[0]
+            ),
+            backend.model.initial_outflow(discharge[first]),
+        ]
+    )
+    filtered = kalman_filter(
+        observations,
+        initial_mean=initial_mean,
+        initial_covariance=backend.initial_covariance,
+        transition_matrix=transitions,
+        process_covariance=process_covariances,
+        observation_matrix=backend.model.observation_matrix,
+        observation_covariance=backend.observation_covariance,
+    )
+    prediction_flags = np.where(
+        np.isfinite(observations).all(axis=1), "NORMAL", "PREDICTED"
+    )
+    result["estimated_inflow"][positions] = filtered.filtered_means[:, 1]
+    result["estimated_inflow_flag"][positions] = prediction_flags
+    _write_fixed_lag_outflows(
+        result,
+        positions=positions,
+        timestamps=timestamps,
+        filtered=filtered,
+        prediction_flags=prediction_flags,
+        smoothing_lag=smoothing_lag,
+        max_window_steps=max_window_steps,
+    )
+    return pandas.DataFrame(result, index=index)
+
+
+def _empty_batch_columns(length: int) -> dict[str, np.ndarray]:
+    """Create the public result layout with dense, preallocated columns."""
+
+    return {
+        "estimated_inflow": np.full(length, np.nan),
+        "estimated_outflow": np.full(length, np.nan),
+        "estimated_inflow_flag": np.full(length, None, dtype=object),
+        "estimated_outflow_flag": np.full(length, None, dtype=object),
+        "estimated_inflow_smoothing_flag": np.full(
+            length, OutputFlag.NON_SMOOTHED.value, dtype=object
+        ),
+        "estimated_outflow_smoothing_flag": np.full(
+            length, OutputFlag.NON_SMOOTHED.value, dtype=object
+        ),
+    }
+
+
+def _initialization_positions(
+    storage: np.ndarray,
+    discharge: np.ndarray,
+) -> tuple[int | None, int | None]:
+    """Return the two input rows that start the reservoir filter."""
+
+    valid_storage = np.flatnonzero(np.isfinite(storage))
+    if not len(valid_storage):
+        return None, None
+    first = int(valid_storage[0])
+    if not np.isfinite(discharge[first]):
+        raise ValueError(
+            "the first valid storage observation needs a finite discharge value"
+        )
+    if len(valid_storage) == 1:
+        return first, None
+    return first, int(valid_storage[1])
+
+
+def _validate_batch_timestamps(index: pandas.DatetimeIndex) -> None:
+    """Apply the streaming timestamp contract before batch computation."""
+
+    previous_utc: datetime | None = None
+    for timestamp in index:
+        timestamp_utc = to_utc(timestamp)
+        if previous_utc is not None and timestamp_utc <= previous_utc:
+            raise ValueError("observation timestamps must be strictly increasing")
+        previous_utc = timestamp_utc
+
+
+def _write_fixed_lag_outflows(
+    result: dict[str, np.ndarray],
+    *,
+    positions: np.ndarray,
+    timestamps: pandas.DatetimeIndex,
+    filtered,
+    prediction_flags: np.ndarray,
+    smoothing_lag: timedelta,
+    max_window_steps: int,
+) -> None:
+    """Release the same fixed-lag RTS outflows as the streaming smoother."""
+
+    active: deque[int] = deque()
+    for current in range(len(timestamps)):
+        eligible = 0
+        for candidate in active:
+            if timestamps[current] - timestamps[candidate] >= smoothing_lag:
+                eligible += 1
+            else:
+                break
+        if not eligible:
+            if len(active) == max_window_steps:
+                raise OverflowError(
+                    "active RTS window reached max_window_steps before "
+                    "a state finalized"
+                )
+            active.append(current)
+            continue
+
+        window = np.fromiter(active, dtype=int)
+        window = np.append(window, current)
+        smoothed_means, _, _ = _rts_smooth_arrays(
+            filtered.filtered_means[window],
+            filtered.filtered_covariances[window],
+            filtered.predicted_means[window],
+            filtered.predicted_covariances[window],
+            filtered.transition_matrices[window[1:] - 1],
+        )
+        finalized = window[:eligible]
+        output_positions = positions[finalized]
+        result["estimated_outflow"][output_positions] = smoothed_means[:eligible, 2]
+        result["estimated_outflow_flag"][output_positions] = prediction_flags[finalized]
+        result["estimated_outflow_smoothing_flag"][output_positions] = (
+            OutputFlag.SMOOTHED.value
+        )
+        for _ in range(eligible):
+            active.popleft()
+        active.append(current)

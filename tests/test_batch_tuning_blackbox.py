@@ -16,14 +16,12 @@ from kalmone import (
     InitializationStrategy,
     NoiseTuningData,
     ReservoirConfig,
-    ReservoirFlowEstimate,
     UnitSystem,
     get_reservoir_inflow,
     get_reservoir_inflow_from_config,
     run_filter_with_noise,
     tune_noise,
 )
-from kalmone.core import _estimates_to_frame
 
 
 def _tuning_config() -> ReservoirConfig:
@@ -203,23 +201,6 @@ class TestBatchAdapterPartitions:
         assert result.loc[index[0], "estimated_inflow"] == pytest.approx(4.0)
         assert result["estimated_outflow"].iloc[:-1].notna().all()
         assert pd.isna(result["estimated_outflow"].iloc[-1])
-
-
-class TestEstimatesToFrameBoundaries:
-    """Direct black-box checks for batch estimate mapping."""
-
-    def test_estimate_timestamp_must_exist_in_index(self) -> None:
-        index = pd.date_range("2024-01-01", periods=1, freq="15min", tz="UTC")
-        estimate = ReservoirFlowEstimate(
-            timestamp=datetime(2024, 1, 2, tzinfo=UTC),
-            value=4.0,
-        )
-        with pytest.raises(ValueError, match="outside the input index"):
-            _estimates_to_frame(
-                index,
-                filtered_inflows=[estimate],
-                estimated_outflows=[],
-            )
 
 
 class TestTuningDataPartitions:

@@ -10,6 +10,7 @@ from kalmone import (
     InitializationStrategy,
     Observation,
     OnlineFixedLagRTS,
+    OnlineReservoirInflow,
     ReservoirConfig,
     ReservoirStateSpaceModel,
     UnitSystem,
@@ -325,3 +326,67 @@ def test_noisy_outflow_measurements_are_smoothed_as_a_state() -> None:
     assert result["estimated_outflow"].std() < measured_outflow.std()
     assert np.isfinite(result["estimated_inflow"]).all()
     assert np.isfinite(result["estimated_outflow"].iloc[:-1]).all()
+
+
+def test_batch_kernel_matches_streaming_for_irregular_missing_data() -> None:
+    index = pd.DatetimeIndex(
+        [
+            datetime(2024, 1, 1, tzinfo=UTC) + timedelta(minutes=minute)
+            for minute in (0, 5, 20, 50, 70, 105)
+        ]
+    )
+    storage = pd.Series([np.nan, 100.0, 101.0, np.nan, 103.0, 104.0], index=index)
+    outflow = pd.Series([4.0, 4.0, 4.5, np.nan, 4.0, 4.0], index=index)
+    kwargs = {
+        "q_storage": 0.1,
+        "q_inflow": 0.1,
+        "q_outflow": 0.1,
+        "r_storage": 0.25,
+        "r_outflow": 0.5,
+        "smoothing_lag": timedelta(minutes=30),
+    }
+
+    actual = get_reservoir_inflow(storage, outflow, **kwargs)
+    stream = OnlineReservoirInflow(**kwargs)
+    expected = {
+        "estimated_inflow": np.full(len(index), np.nan),
+        "estimated_outflow": np.full(len(index), np.nan),
+        "estimated_inflow_flag": np.full(len(index), None, dtype=object),
+        "estimated_outflow_flag": np.full(len(index), None, dtype=object),
+        "estimated_inflow_smoothing_flag": np.full(
+            len(index), "NON_SMOOTHED", dtype=object
+        ),
+        "estimated_outflow_smoothing_flag": np.full(
+            len(index), "NON_SMOOTHED", dtype=object
+        ),
+    }
+    for timestamp, storage_value, outflow_value in zip(
+        index, storage, outflow, strict=True
+    ):
+        update = stream.process(
+            Observation(timestamp, storage_value, outflow_value)
+        )
+        for estimate in update.filtered_inflows:
+            output_position = index.get_loc(estimate.timestamp)
+            expected["estimated_inflow"][output_position] = estimate.value
+            expected["estimated_inflow_flag"][output_position] = (
+                estimate.prediction_flag.value
+            )
+        for estimate in update.estimated_outflows:
+            output_position = index.get_loc(estimate.timestamp)
+            expected["estimated_outflow"][output_position] = estimate.value
+            expected["estimated_outflow_flag"][output_position] = (
+                estimate.prediction_flag.value
+            )
+            expected["estimated_outflow_smoothing_flag"][output_position] = (
+                estimate.smoothing_flag.value
+            )
+
+    for column, values in expected.items():
+        if values.dtype == object:
+            actual_values = actual[column].to_numpy(dtype=object)
+            assert np.array_equal(pd.isna(actual_values), pd.isna(values))
+            present = ~pd.isna(values)
+            assert actual_values[present].tolist() == values[present].tolist()
+        else:
+            npt.assert_allclose(actual[column], values, equal_nan=True)
