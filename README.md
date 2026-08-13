@@ -1,153 +1,102 @@
-# Kalman filtering for reservoir inflow calculation
+# Kalmone
 
-## Problem
+Kalmone estimates reservoir inflow from noisy storage and measured discharge. It provides a three-state physical water-balance model, causal Kalman filtering, and fixed-lag Rauch–Tung–Striebel (RTS) smoothing for delayed outflow estimates.
+
+The package is intentionally data-source agnostic: applications are responsible for parsing, cleaning, aligning, and persisting reservoir data.
+
+## Overview
 
 Reservoir inflow is important for water-supply planning and flood-response
 operations, but it is often difficult to measure directly. A reservoir may
 receive water from many tributaries, drainage areas, or stormwater inputs, so
 installing and maintaining flow sensors at every inflow point is not practical.
 
-Valley Water has multiple years of timestamped reservoir storage and outflow data.
-In principle, that data can be used to back-calculate inflow with reverse
-level-pool routing: if storage and outflow are known, inflow can be inferred
-from the water balance. In practice, direct back-calculation is sensitive to
-sensor noise and timing differences. Small errors in storage or outflow can
-produce unrealistic inflow estimates, including large spikes or negative values.
+Timestamped reservoir storage and outflow data can be used to infer inflow
+with reverse level-pool routing: if storage and outflow are known, inflow can
+be recovered from the water balance. Direct back-calculation, however, is
+sensitive to sensor noise and timing differences. Small storage or outflow
+errors can yield unrealistic inflow spikes or negative values.
 
-The goal of this project is to use Kalman filtering to estimate a more stable,
-physically reasonable inflow time series from noisy storage and outflow
-observations. The method should support real-time use, where the most recent
-inflow estimates may continue to adjust as new observations arrive.
+Kalmone estimates a more stable, physically reasonable inflow time series from
+those noisy observations. It supports real-time use, where new observations
+can refine delayed outflow estimates, and provides documented assumptions and
+noise-tuning tools for a measurable, defensible deployment.
 
-The method also needs to be measurable and defensible. That means quantifying
-performance, documenting the assumptions, and justifying parameter choices such
-as process variance and sensor measurement variance.
+## Install
 
-## Package contract
-
-`get_reservoir_inflow` is the batch API. It accepts pre-cleaned, timezone-aware,
-sorted, deduplicated storage and measured outflow `Series` and returns a
-`DataFrame` with `estimated_inflow` and `estimated_outflow` columns plus
-prediction and smoothing flag columns. The `*_flag` columns contain `NORMAL`
-or `PREDICTED`; any single- or double-missing observation produces
-`PREDICTED`. The `*_smoothing_flag` columns contain `SMOOTHED` or
-`NON_SMOOTHED`. Inflow is the causal filtered estimate available when each
-observation is processed, so it is `NON_SMOOTHED`; outflow is populated only
-after its fixed-lag estimate is finalized, so released values are `SMOOTHED`.
-Unfinished trailing outflow values are `NaN` and are marked `NON_SMOOTHED`.
-Storage remains an internal model state and is not included in the public
-frame.
-
-`OnlineReservoirInflow` is the reservoir-specific streaming API. Each
-`process` call returns a `ReservoirFlowUpdate`:
-
-- `filtered_inflows` contains timestamped inflow estimates available from the
-  causal filter. Each estimate exposes `prediction_flag` (`NORMAL` or
-  `PREDICTED`) and `smoothing_flag` (`NON_SMOOTHED`). The first valid storage
-  timestamp is emitted when the second valid storage observation completes
-  initialization.
-- `estimated_outflows` contains only timestamped outflow estimates finalized by
-  the smoothing lag. Each estimate exposes `prediction_flag` and
-  `smoothing_flag=SMOOTHED`. Provisional lag-window estimates are not exposed.
-
-Validated deployments can construct the streaming estimator with
-`OnlineReservoirInflow.from_config(config)` or use the corresponding batch
-adapter `get_reservoir_inflow_from_config(storage, outflow, config)`. These
-paths honor the configuration's initial covariance, unit system, noise
-covariances, and smoothing lag. The scalar-parameter batch API remains the
-convenience path for the default acre-ft/cfs model.
-
-Configured streams can be resumed with compact trusted checkpoints. A
-checkpoint belongs to exactly one `reservoir_id`; restoration rejects a
-configuration for another reservoir but otherwise relies on the caller to use
-a compatible configuration. Checkpoints are separate from output processing:
-
-```python
-stream = OnlineReservoirInflow.from_checkpoint(checkpoint, config=config)
-update = stream.process(observation)
-checkpoint = stream.checkpoint()
+```bash
+pip install kalmone
+# Optional Q/R tuning support
+pip install 'kalmone[tuning]'
 ```
 
-Use `stream.process_many(observations)` when an ordered group should be
-accepted atomically. It returns the same updates as individual `process` calls
-and restores the entry state if any observation fails. Applications serving
-multiple reservoirs should keep independent configured streams, for example
-`dict[str, OnlineReservoirInflow]`. The batch APIs do not accept or create
-checkpoints.
+For development in this repository:
 
-`OnlineInflowPipeline` is the streaming API. Each `process` call returns a
-`PipelineUpdate`:
+```bash
+uv sync --all-groups
+```
 
-- `filtered_state` is the current causal Kalman output that was just processed.
-- `filtered_states` contains every new causal filter state created by the call,
-  including both initialization states.
-- `smoothed_states` contains states finalized after the smoothing lag.
+## Quick start
 
-`OnlineInflowPipeline` remains available as the lower-level generic coordinator;
-use `OnlineReservoirInflow` when the public output should contain only the
-staggered reservoir flow estimates.
+Use `OnlineReservoirInflow` when observations arrive one at a time. Timestamps must be timezone-aware; the first completed initialization emits estimates for the first two valid storage observations.
 
-The pipeline requires timezone-aware, strictly increasing timestamps. Input
-series must be pre-cleaned by the caller: parsed, aligned, sorted, and
-deduplicated. The default reservoir state is
-`[storage, inflow_rate, true_outflow_rate]`, where the public batch adapter reports both flow-rate states as cfs. Missing components are omitted from the Kalman update and if both are missing, the step is predict-only.
+```python
+from datetime import UTC, datetime, timedelta
+from kalmone import Observation, OnlineReservoirInflow
 
-This package does not parse, align, deduplicate, impute, or otherwise clean
-input data beyond those runtime missing-value rules.
+stream = OnlineReservoirInflow(
+    q_storage=1.0,
+    q_inflow=1.0,
+    q_outflow=1.0,
+    r_storage=100.0,
+    r_outflow=25.0,
+    smoothing_lag=timedelta(hours=12),
+)
 
-## Assumptions
+stream.process(
+    Observation(datetime(2026, 1, 1, tzinfo=UTC), storage=10_000.0, discharge=25.0)
+)
+update = stream.process(
+    Observation(
+        datetime(2026, 1, 1, 0, 15, tzinfo=UTC),
+        storage=10_001.0,
+        discharge=25.5,
+    )
+)
 
-- Storage and outflow inputs have matching, timezone-aware `DatetimeIndex`
-values in the same order. The caller provides parsed, strictly increasing,
-duplicate-free data; the package does not sort, align, or deduplicate it.
-- Elapsed-time calculations are normalized to UTC, so timezone-aware timestamps
-may use named time zones and still cross daylight-saving transitions safely.
-- State order is `[storage, inflow_rate, true_outflow_rate]`. Storage uses the
-configured volume unit and both flow-rate states use the configured flow-rate
-unit; the public batch adapter reports both flow-rate outputs in cfs.
-- Storage and measured outflow are observations with separate measurement
-variances. Outflow is not a known control input.
-- Online initialization waits for two finite storage observations and requires
-finite outflow for the first valid storage. The second outflow may be missing.
-After initialization, missing storage or outflow is handled as a partial
-observation.
-- Tuning requires two finite initial storage values and a finite first outflow.
-Later missing storage or outflow values are omitted from their respective
-innovation channels.
-- The batch `estimated_inflow` column contains causal filtered values. The
-  batch `estimated_outflow` column contains only finalized fixed-lag values,
-  with `NaN` for the unfinished trailing lag window. Storage is internal and
-  is not part of the public batch or reservoir-stream output.
-- Process diffusion covariances and initial covariance must be finite, symmetric,
-and positive semidefinite. The 3x3 `q` and `p0` matrices use the state order
-above. The 2x2 measurement covariance `r` uses storage/outflow order and has
-strictly positive diagonal entries. The physical-rate model derives each
-discrete process covariance from its continuous-time diffusion covariance and
-actual elapsed seconds.
-- `ReservoirConfig` supplies physical-state model and tuning parameters. `q`
-uses the continuous-time diffusion convention and `p0` uses
-`[storage, inflow_rate, true_outflow_rate]` units. Existing two-state or
-reference-interval configurations require explicit migration; their numeric
-values must not be reused without re-tuning.
+for estimate in update.filtered_inflows:
+    print(estimate.timestamp, estimate.value, estimate.prediction_flag)
+```
 
+The scalar values above only make the example runnable; select and validate noise parameters for each reservoir. See [configuration and tuning](Documentation/CONFIGURATION_AND_TUNING.md).
 
+## Primary APIs
 
-## Optional tuning
+| API | Use it when |
+| --- | --- |
+| `get_reservoir_inflow` | You have aligned pandas storage and discharge series and use the default acre-ft/cfs model. |
+| `get_reservoir_inflow_from_config` | You have batch data and a validated `ReservoirConfig`. |
+| `OnlineReservoirInflow` | You process one reservoir’s observations as they arrive. |
+| `OnlineReservoirInflow.from_config` | You need a configured, checkpoint-capable streaming estimator. |
+| `OnlineInflowPipeline` | You are integrating a custom backend or smoother. |
+| `tune_noise` | You want to optimize Q/R from a pre-cleaned historical record (requires the `tuning` extra). |
 
-`tune_noise` optimizes `q_storage`, `q_inflow`, `q_outflow`, `r_storage`, and
-`r_outflow` in log space. It imports SciPy only when called; the core estimator
-does not require SciPy. Install the optional tuning dependency with
-`pip install -e '.[tuning]'`. Tuning returns a result object and never mutates
-the active configuration. The `loglik` objective uses joint filter log
-likelihood; the `rmse` objective uses standardized finite one-step innovations
-from both observation channels.
+## Documentation
 
-Artifact persistence remains outside this package.
+- [Architecture](Documentation/ARCHITECTURE.md): modules, state-space model, units, and library boundaries.
+- [Model behavior](Documentation/INFLOW_MODEL_BEHAVIOR.md): input contract, initialization, missing values, and batch/streaming outputs.
+- [Online pipeline](Documentation/ONLINE_INFLOW_PIPELINE.md): lifecycle, checkpoints, and failure behavior.
+- [Configuration and tuning](Documentation/CONFIGURATION_AND_TUNING.md): complete configuration example, unit conventions, parameter selection, and tuning workflow.
 
-## Unit migration
+## Requirements and units
 
-The physical-rate model uses actual timestamp differences for every transition.
-The public `estimated_inflow` and `estimated_outflow` results are cfs, regardless
-of whether samples arrive every 5, 10, 15, or 60 minutes. Existing two-state
-configurations, scalar measurement variances, and tuned artifacts are a
-different model version and must be converted and revalidated before use.
+Inputs must be pre-cleaned and timestamped with timezone-aware, strictly increasing values. The default model uses acre-feet for storage and cfs for flow rates. Missing storage or discharge is represented by `NaN`; available components still participate in a partial update.
+
+The default state is `[storage, inflow_rate, true_outflow_rate]`. Inflow is causal; outflow is released only after the fixed smoothing lag has elapsed.
+
+## Development
+
+```bash
+uv run pytest
+uv run ruff check .
+```
