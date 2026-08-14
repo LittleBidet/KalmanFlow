@@ -25,7 +25,9 @@ stream = OnlineReservoirInflow(
 update = stream.process(Observation(timestamp, storage, discharge))
 ```
 
-`filtered_inflows` are causal and marked `NON_SMOOTHED`. `estimated_outflows` are released only after smoothing and marked `SMOOTHED`.
+`filtered_inflows` are causal and marked `NON_SMOOTHED`. `revised_inflows`
+are released only after smoothing and marked `SMOOTHED`; each is an absolute
+inflow value that replaces the causal estimate at the same timestamp.
 
 ## Checkpoints
 
@@ -43,4 +45,3 @@ Checkpoints are unavailable during processing, before a successful processing re
 ## Resource bounds and failures
 
 `max_window_steps` must be at least two and bounds the active smoother window. Exceeding that bound, invalid timestamps, incompatible checkpoint data, or a backend failure raises an exception. `process_many` rolls back its entire input group on failure; single `process` validates before forwarding values to the pipeline.
-

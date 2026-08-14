@@ -23,6 +23,7 @@ from .models import (
     StateSpaceModel,
 )
 from .observations import Observation
+from .pandas_api import run_inflow_model
 from .pipeline import (
     OnlineInflowPipeline,
     PipelineUpdate,
@@ -76,6 +77,7 @@ __all__ = [
     "kalman_step",
     "predict_state",
     "run_filter_with_noise",
+    "run_inflow_model",
     "smooth_filter_steps",
     "tune_noise",
 ]

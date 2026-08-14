@@ -1,6 +1,6 @@
 # Kalmone
 
-Kalmone estimates reservoir inflow from noisy storage and measured discharge. It provides a three-state physical water-balance model, causal Kalman filtering, and fixed-lag Rauch–Tung–Striebel (RTS) smoothing for delayed outflow estimates.
+Kalmone estimates reservoir inflow from noisy storage and measured discharge. It provides a three-state physical water-balance model, causal Kalman filtering, and fixed-lag Rauch–Tung–Striebel (RTS) smoothing for delayed inflow revisions.
 
 The package is intentionally data-source agnostic: applications are responsible for parsing, cleaning, aligning, and persisting reservoir data.
 
@@ -18,9 +18,11 @@ sensitive to sensor noise and timing differences. Small storage or outflow
 errors can yield unrealistic inflow spikes or negative values.
 
 Kalmone estimates a more stable, physically reasonable inflow time series from
-those noisy observations. It supports real-time use, where new observations
-can refine delayed outflow estimates, and provides documented assumptions and
-noise-tuning tools for a measurable, defensible deployment.
+those noisy observations. It supports real-time use: a causal inflow is first
+published immediately, then a later observation can provide an absolute,
+fixed-lag-smoothed replacement for that same timestamp. It also provides
+documented assumptions and noise-tuning tools for a measurable, defensible
+deployment.
 
 ## Install
 
@@ -66,6 +68,10 @@ update = stream.process(
 
 for estimate in update.filtered_inflows:
     print(estimate.timestamp, estimate.value, estimate.prediction_flag)
+
+for revision in update.revised_inflows:
+    # Replace the causal value at revision.timestamp; do not add a delta.
+    print(revision.timestamp, revision.value, revision.smoothing_flag)
 ```
 
 The scalar values above only make the example runnable; select and validate noise parameters for each reservoir. See [configuration and tuning](Documentation/CONFIGURATION_AND_TUNING.md).
@@ -92,7 +98,10 @@ The scalar values above only make the example runnable; select and validate nois
 
 Inputs must be pre-cleaned and timestamped with timezone-aware, strictly increasing values. The default model uses acre-feet for storage and cfs for flow rates. Missing storage or discharge is represented by `NaN`; available components still participate in a partial update.
 
-The default state is `[storage, inflow_rate, true_outflow_rate]`. Inflow is causal; outflow is released only after the fixed smoothing lag has elapsed.
+The default state is `[storage, inflow_rate, true_outflow_rate]`. Storage and
+measured outflow are model inputs, and true outflow is an internal state. The
+public API returns causal inflow followed by absolute revised inflow values;
+it never returns outflow estimates.
 
 ## Development
 

@@ -58,7 +58,7 @@ def _assert_updates_equal(actual, expected) -> None:
     for actual_update, expected_update in zip(actual, expected, strict=True):
         for actual_values, expected_values in (
             (actual_update.filtered_inflows, expected_update.filtered_inflows),
-            (actual_update.estimated_outflows, expected_update.estimated_outflows),
+            (actual_update.revised_inflows, expected_update.revised_inflows),
         ):
             assert len(actual_values) == len(expected_values)
             for actual_estimate, expected_estimate in zip(
@@ -225,7 +225,7 @@ def test_missing_observations_replay_without_duplicate_outputs() -> None:
     assert [
         estimate.timestamp
         for update in actual[4:]
-        for estimate in update.estimated_outflows
+        for estimate in update.revised_inflows
     ].count(observations[0].timestamp) == 0
 
 

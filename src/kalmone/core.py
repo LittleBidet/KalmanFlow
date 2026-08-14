@@ -55,19 +55,20 @@ class ReservoirFlowEstimate:
 
 @dataclass(frozen=True)
 class ReservoirFlowUpdate:
-    """Streaming outputs."""
+    """Causal inflows and their delayed, absolute revisions."""
 
     filtered_inflows: tuple[ReservoirFlowEstimate, ...]
-    estimated_outflows: tuple[ReservoirFlowEstimate, ...]
+    revised_inflows: tuple[ReservoirFlowEstimate, ...]
 
 
 class OnlineReservoirInflow:
-    """Reservoir-specific streaming with staggered flow outputs.
+    """Reservoir-specific streaming with causal inflows and delayed revisions.
 
     Filtered inflow estimates are returned as soon as forward filter steps are
-    available. Estimated outflow estimates are returned only after the fixed-lag
-    smoother finalizes their timestamps. Storage and provisional smoothed states
-    remain internal.
+    available. Revised inflow estimates are returned only after the fixed-lag
+    smoother finalizes their timestamps. A revision is the absolute smoothed
+    value that replaces the causal inflow at the same timestamp. Storage,
+    outflow, and provisional smoothed states remain internal.
     """
 
     def __init__(
@@ -333,10 +334,10 @@ class OnlineReservoirInflow:
                 )
                 for step in update.filtered_states
             ),
-            estimated_outflows=tuple(
+            revised_inflows=tuple(
                 ReservoirFlowEstimate(
                     timestamp=state.timestamp,
-                    value=float(state.mean[2]),
+                    value=float(state.mean[1]),
                     prediction_flag=state.prediction_flag,
                     smoothing_flag=OutputFlag.SMOOTHED,
                 )
@@ -396,7 +397,8 @@ def get_reservoir_inflow(
     - ``reservoir_storage``: acre-ft
     - ``reservoir_outflow``: measured cfs
     - returned ``estimated_inflow``: cfs, causal filtered estimates
-    - returned ``estimated_outflow``: cfs, finalized fixed-lag estimates
+    - returned ``revised_inflow``: cfs, finalized fixed-lag-smoothed
+      replacements for the causal estimates at the same timestamps
 
     :param reservoir_storage: Pre-cleaned storage series in acre-ft. Index must
         be a timezone-aware, strictly increasing ``DateTimeIndex``. NaN marks
@@ -410,7 +412,7 @@ def get_reservoir_inflow(
         outflow rate.
     :param r_storage: Positive storage measurement-noise variance.
     :param r_outflow: Positive outflow measurement-noise variance.
-    :param smoothing_lag: Time lag before delayed outflow estimates are finalized.
+    :param smoothing_lag: Time lag before delayed inflow revisions are finalized.
     :param max_window_steps: Maximum number of active states for the fixed-lag
         smoother.
     Input series must be pre-cleaned by the caller: parsed, aligned, sorted, and
@@ -418,12 +420,12 @@ def get_reservoir_inflow(
     pipeline applies the documented missing-value rules but does not otherwise
     clean the series.
     :return: DataFrame indexed like the inputs with estimate and provenance
-        columns. ``estimated_inflow_flag`` and ``estimated_outflow_flag`` are
+        columns. ``estimated_inflow_flag`` and ``revised_inflow_flag`` are
         ``NORMAL`` or ``PREDICTED``; the latter is used for both single- and
-        double-missing observations. The corresponding ``*_smoothing_flag``
-        columns are ``NON_SMOOTHED`` for causal inflow and ``SMOOTHED`` for
-        finalized outflow. Trailing outflow values remain NaN and have a
-        ``NON_SMOOTHED`` smoothing flag until their lag has elapsed.
+        double-missing observations. The estimated-inflow smoothing flag is
+        always ``NON_SMOOTHED``. Finalized revised inflows are ``SMOOTHED``;
+        trailing revisions remain NaN and ``NON_SMOOTHED`` until their lag has
+        elapsed. Outflow is used by the model but is not a public result.
     """
     if not reservoir_storage.index.equals(reservoir_outflow.index):
         raise ValueError("storage and outflow indexes must match exactly")
@@ -653,7 +655,7 @@ def _process_reservoir_batch_raw(
     )
     result["estimated_inflow"][positions] = filtered.filtered_means[:, 1]
     result["estimated_inflow_flag"][positions] = prediction_flags
-    _write_fixed_lag_outflows(
+    _write_fixed_lag_inflow_revisions(
         result,
         positions=positions,
         timestamps=timestamps,
@@ -670,13 +672,13 @@ def _empty_batch_columns(length: int) -> dict[str, np.ndarray]:
 
     return {
         "estimated_inflow": np.full(length, np.nan),
-        "estimated_outflow": np.full(length, np.nan),
+        "revised_inflow": np.full(length, np.nan),
         "estimated_inflow_flag": np.full(length, None, dtype=object),
-        "estimated_outflow_flag": np.full(length, None, dtype=object),
+        "revised_inflow_flag": np.full(length, None, dtype=object),
         "estimated_inflow_smoothing_flag": np.full(
             length, OutputFlag.NON_SMOOTHED.value, dtype=object
         ),
-        "estimated_outflow_smoothing_flag": np.full(
+        "revised_inflow_smoothing_flag": np.full(
             length, OutputFlag.NON_SMOOTHED.value, dtype=object
         ),
     }
@@ -712,7 +714,7 @@ def _validate_batch_timestamps(index: pandas.DatetimeIndex) -> None:
         previous_utc = timestamp_utc
 
 
-def _write_fixed_lag_outflows(
+def _write_fixed_lag_inflow_revisions(
     result: dict[str, np.ndarray],
     *,
     positions: np.ndarray,
@@ -722,7 +724,7 @@ def _write_fixed_lag_outflows(
     smoothing_lag: timedelta,
     max_window_steps: int,
 ) -> None:
-    """Release the same fixed-lag RTS outflows as the streaming smoother."""
+    """Write absolute fixed-lag RTS inflow replacements for finalized states."""
 
     active: deque[int] = deque()
     for current in range(len(timestamps)):
@@ -752,9 +754,9 @@ def _write_fixed_lag_outflows(
         )
         finalized = window[:eligible]
         output_positions = positions[finalized]
-        result["estimated_outflow"][output_positions] = smoothed_means[:eligible, 2]
-        result["estimated_outflow_flag"][output_positions] = prediction_flags[finalized]
-        result["estimated_outflow_smoothing_flag"][output_positions] = (
+        result["revised_inflow"][output_positions] = smoothed_means[:eligible, 1]
+        result["revised_inflow_flag"][output_positions] = prediction_flags[finalized]
+        result["revised_inflow_smoothing_flag"][output_positions] = (
             OutputFlag.SMOOTHED.value
         )
         for _ in range(eligible):

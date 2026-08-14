@@ -41,6 +41,11 @@ stream = OnlineReservoirInflow.from_config(config)
 batch_result = get_reservoir_inflow_from_config(storage, discharge, config)
 ```
 
+Both adapters use discharge as an observation input, but only return causal
+and revised inflow. A revised inflow is an absolute fixed-lag-smoothed value
+that replaces the causal inflow at its timestamp; it is not an adjustment to
+add. The latent true outflow state is never a public result.
+
 ## Matrix and unit conventions
 
 The state order is `[storage, inflow_rate, true_outflow_rate]`.

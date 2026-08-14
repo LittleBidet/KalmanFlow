@@ -1,7 +1,7 @@
 [project]
 name = "kalmone"
 version = "0.1.0"
-description = "Kalman filtering and fixed-lag smoothing for reservoir inflow estimation."
+description = "Causal filtering and fixed-lag inflow revisions for reservoir inflow estimation."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

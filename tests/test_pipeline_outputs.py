@@ -115,7 +115,7 @@ def test_pipeline_returns_immediate_filter_and_delayed_smoother_outputs():
     assert third.smoothed_states[0].mean.tolist() == [100.0, 110.0]
 
 
-def test_reservoir_stream_emits_filtered_inflow_before_lagged_outflow():
+def test_reservoir_stream_emits_causal_inflow_before_lagged_revision():
     start = datetime(2024, 1, 1, tzinfo=UTC)
     stream = OnlineReservoirInflow(
         q_storage=0.1,
@@ -128,7 +128,8 @@ def test_reservoir_stream_emits_filtered_inflow_before_lagged_outflow():
 
     first = stream.process(timestamp=start, storage=100.0, discharge=4.0)
     assert first.filtered_inflows == ()
-    assert first.estimated_outflows == ()
+    assert first.revised_inflows == ()
+    assert tuple(first.__dataclass_fields__) == ("filtered_inflows", "revised_inflows")
 
     second = stream.process(
         timestamp=start + timedelta(minutes=5),
@@ -147,7 +148,7 @@ def test_reservoir_stream_emits_filtered_inflow_before_lagged_outflow():
         estimate.smoothing_flag is OutputFlag.NON_SMOOTHED
         for estimate in second.filtered_inflows
     )
-    assert second.estimated_outflows == ()
+    assert second.revised_inflows == ()
 
     third = stream.process(
         timestamp=start + timedelta(minutes=10),
@@ -157,9 +158,9 @@ def test_reservoir_stream_emits_filtered_inflow_before_lagged_outflow():
     assert [estimate.timestamp for estimate in third.filtered_inflows] == [
         start + timedelta(minutes=10)
     ]
-    assert [estimate.timestamp for estimate in third.estimated_outflows] == [start]
-    assert third.estimated_outflows[0].prediction_flag is OutputFlag.NORMAL
-    assert third.estimated_outflows[0].smoothing_flag is OutputFlag.SMOOTHED
+    assert [estimate.timestamp for estimate in third.revised_inflows] == [start]
+    assert third.revised_inflows[0].prediction_flag is OutputFlag.NORMAL
+    assert third.revised_inflows[0].smoothing_flag is OutputFlag.SMOOTHED
 
 
 def test_reservoir_stream_marks_single_and_double_missing_as_predicted():
@@ -194,7 +195,7 @@ def test_reservoir_stream_marks_single_and_double_missing_as_predicted():
     assert double_missing.filtered_inflows[0].prediction_flag is OutputFlag.PREDICTED
 
 
-def test_reservoir_stream_can_be_built_from_validated_config():
+def test_reservoir_stream_revises_with_smoothed_inflow_not_latent_outflow():
     start = datetime(2024, 1, 1, tzinfo=UTC)
     config = ReservoirConfig(
         reservoir_id="si-demo",
@@ -219,4 +220,5 @@ def test_reservoir_stream_can_be_built_from_validated_config():
     )
 
     assert update.filtered_inflows[0].value == 4.0
-    assert update.estimated_outflows[0].timestamp == start
+    assert update.revised_inflows[0].timestamp == start
+    assert update.revised_inflows[0].value == 4.0

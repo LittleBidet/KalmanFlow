@@ -263,15 +263,15 @@ def test_get_reservoir_inflow_default_pipeline_returns_batch_frame() -> None:
     assert result.index.equals(index)
     assert list(result.columns) == [
         "estimated_inflow",
-        "estimated_outflow",
+        "revised_inflow",
         "estimated_inflow_flag",
-        "estimated_outflow_flag",
+        "revised_inflow_flag",
         "estimated_inflow_smoothing_flag",
-        "estimated_outflow_smoothing_flag",
+        "revised_inflow_smoothing_flag",
     ]
     assert result["estimated_inflow"].notna().all()
-    assert result["estimated_outflow"].iloc[:-1].notna().all()
-    assert result["estimated_outflow"].iloc[-1:].isna().all()
+    assert result["revised_inflow"].iloc[:-1].notna().all()
+    assert result["revised_inflow"].iloc[-1:].isna().all()
 
 
 def test_get_reservoir_inflow_reports_cfs_for_ten_minute_samples() -> None:
@@ -302,7 +302,7 @@ def test_get_reservoir_inflow_reports_cfs_for_ten_minute_samples() -> None:
     assert result.loc[index[0], "estimated_inflow"] == pytest.approx(expected_rate)
 
 
-def test_noisy_outflow_measurements_are_smoothed_as_a_state() -> None:
+def test_noisy_outflow_measurements_inform_smoothed_inflow() -> None:
     index = pd.date_range("2024-01-01", periods=8, freq="15min", tz="UTC")
     units = UnitSystem.us_customary()
     storage_values = [100.0]
@@ -323,9 +323,8 @@ def test_noisy_outflow_measurements_are_smoothed_as_a_state() -> None:
         smoothing_lag=timedelta(minutes=15),
     )
 
-    assert result["estimated_outflow"].std() < measured_outflow.std()
     assert np.isfinite(result["estimated_inflow"]).all()
-    assert np.isfinite(result["estimated_outflow"].iloc[:-1]).all()
+    assert np.isfinite(result["revised_inflow"].iloc[:-1]).all()
 
 
 def test_batch_kernel_matches_streaming_for_irregular_missing_data() -> None:
@@ -350,13 +349,13 @@ def test_batch_kernel_matches_streaming_for_irregular_missing_data() -> None:
     stream = OnlineReservoirInflow(**kwargs)
     expected = {
         "estimated_inflow": np.full(len(index), np.nan),
-        "estimated_outflow": np.full(len(index), np.nan),
+        "revised_inflow": np.full(len(index), np.nan),
         "estimated_inflow_flag": np.full(len(index), None, dtype=object),
-        "estimated_outflow_flag": np.full(len(index), None, dtype=object),
+        "revised_inflow_flag": np.full(len(index), None, dtype=object),
         "estimated_inflow_smoothing_flag": np.full(
             len(index), "NON_SMOOTHED", dtype=object
         ),
-        "estimated_outflow_smoothing_flag": np.full(
+        "revised_inflow_smoothing_flag": np.full(
             len(index), "NON_SMOOTHED", dtype=object
         ),
     }
@@ -372,13 +371,13 @@ def test_batch_kernel_matches_streaming_for_irregular_missing_data() -> None:
             expected["estimated_inflow_flag"][output_position] = (
                 estimate.prediction_flag.value
             )
-        for estimate in update.estimated_outflows:
+        for estimate in update.revised_inflows:
             output_position = index.get_loc(estimate.timestamp)
-            expected["estimated_outflow"][output_position] = estimate.value
-            expected["estimated_outflow_flag"][output_position] = (
+            expected["revised_inflow"][output_position] = estimate.value
+            expected["revised_inflow_flag"][output_position] = (
                 estimate.prediction_flag.value
             )
-            expected["estimated_outflow_smoothing_flag"][output_position] = (
+            expected["revised_inflow_smoothing_flag"][output_position] = (
                 estimate.smoothing_flag.value
             )
 

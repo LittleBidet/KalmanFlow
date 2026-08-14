@@ -35,9 +35,12 @@ The rate states are random walks. `ReservoirStateSpaceModel` derives the transit
 
 Use `get_reservoir_inflow` for a pandas batch result, or `OnlineReservoirInflow` for a reservoir-specific stream. The latter is built on the generic `OnlineInflowPipeline`, which can also be used with another backend and smoother implementation.
 
-The public reservoir layer exposes causal filtered inflow immediately and only exposes outflow when its fixed-lag RTS estimate is final. Generic filter and smoothing types remain available for advanced integrations.
+The public reservoir layer exposes causal filtered inflow immediately and
+later exposes an absolute fixed-lag RTS revised inflow for the same timestamp.
+Storage, measured outflow, and latent true outflow remain model inputs or
+internal state; no public outflow result is exposed. Generic filter and
+smoothing types remain available for advanced integrations.
 
 ## Data ownership and boundaries
 
 Kalmone does not read files, fetch data, parse timestamps, align series, deduplicate records, or persist tuning artifacts. Those concerns stay in the calling application. The package validates the runtime contract—including timestamps, matrix shapes, covariance properties, and missing observations—at the library boundary.
-

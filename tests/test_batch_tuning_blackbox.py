@@ -20,6 +20,7 @@ from kalmone import (
     get_reservoir_inflow,
     get_reservoir_inflow_from_config,
     run_filter_with_noise,
+    run_inflow_model,
     tune_noise,
 )
 
@@ -66,15 +67,15 @@ class TestBatchAdapterPartitions:
         assert result.index.equals(storage.index)
         assert list(result.columns) == [
             "estimated_inflow",
-            "estimated_outflow",
+            "revised_inflow",
             "estimated_inflow_flag",
-            "estimated_outflow_flag",
+            "revised_inflow_flag",
             "estimated_inflow_smoothing_flag",
-            "estimated_outflow_smoothing_flag",
+            "revised_inflow_smoothing_flag",
         ]
         assert result["estimated_inflow"].notna().all()
-        assert result["estimated_outflow"].iloc[:-1].notna().all()
-        assert result["estimated_outflow"].iloc[-1:].isna().all()
+        assert result["revised_inflow"].iloc[:-1].notna().all()
+        assert result["revised_inflow"].iloc[-1:].isna().all()
 
     def test_missing_storage_partition_is_supported(self) -> None:
         storage, outflow = _aligned_series(count=5)
@@ -90,6 +91,27 @@ class TestBatchAdapterPartitions:
             smoothing_lag=timedelta(minutes=15),
         )
         assert result.shape == (5, 6)
+
+    def test_pandas_convenience_api_returns_inflow_only_outputs(self) -> None:
+        storage, outflow = _aligned_series()
+        result = run_inflow_model(
+            pd.DataFrame({"storage": storage, "outflow": outflow}),
+            q_storage=0.1,
+            q_inflow=0.1,
+            q_outflow=0.1,
+            r_storage=0.25,
+            r_outflow=0.5,
+            smoothing_lag=timedelta(minutes=15),
+        )
+
+        assert list(result.columns) == [
+            "estimated_inflow",
+            "revised_inflow",
+            "estimated_inflow_flag",
+            "revised_inflow_flag",
+            "estimated_inflow_smoothing_flag",
+            "revised_inflow_smoothing_flag",
+        ]
 
     def test_missing_observation_sets_predicted_flag(self) -> None:
         storage, outflow = _aligned_series(count=5)
@@ -110,15 +132,15 @@ class TestBatchAdapterPartitions:
         assert result.loc[storage.index[1], "estimated_inflow_flag"] == "NORMAL"
         assert result.loc[storage.index[2], "estimated_inflow_flag"] == "PREDICTED"
         assert result.loc[storage.index[3], "estimated_inflow_flag"] == "PREDICTED"
-        assert result.loc[storage.index[2], "estimated_outflow_flag"] == "PREDICTED"
-        assert result.loc[storage.index[3], "estimated_outflow_flag"] == "PREDICTED"
+        assert result.loc[storage.index[2], "revised_inflow_flag"] == "PREDICTED"
+        assert result.loc[storage.index[3], "revised_inflow_flag"] == "PREDICTED"
         assert (
             result["estimated_inflow_smoothing_flag"] == "NON_SMOOTHED"
         ).all()
         assert (
-            result["estimated_outflow_smoothing_flag"].iloc[:-1] == "SMOOTHED"
+            result["revised_inflow_smoothing_flag"].iloc[:-1] == "SMOOTHED"
         ).all()
-        assert result["estimated_outflow_smoothing_flag"].iloc[-1] == "NON_SMOOTHED"
+        assert result["revised_inflow_smoothing_flag"].iloc[-1] == "NON_SMOOTHED"
 
     def test_unequal_length_series_rejected(self) -> None:
         storage, outflow = _aligned_series(count=4)
@@ -199,8 +221,8 @@ class TestBatchAdapterPartitions:
         )
 
         assert result.loc[index[0], "estimated_inflow"] == pytest.approx(4.0)
-        assert result["estimated_outflow"].iloc[:-1].notna().all()
-        assert pd.isna(result["estimated_outflow"].iloc[-1])
+        assert result["revised_inflow"].iloc[:-1].notna().all()
+        assert pd.isna(result["revised_inflow"].iloc[-1])
 
 
 class TestTuningDataPartitions:
