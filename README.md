@@ -21,7 +21,7 @@ Kalmone estimates a more stable, physically reasonable inflow time series from
 those noisy observations. It supports real-time use: a causal inflow is first
 published immediately, then a later observation can provide an absolute,
 fixed-lag-smoothed replacement for that same timestamp. It also provides
-documented assumptions and noise-tuning tools for a measurable, defensible
+documented assumptions and reviewed noise parameters for a measurable, defensible
 deployment.
 
 ## Install
@@ -72,7 +72,7 @@ for revision in update.revised_inflows:
     print(revision.timestamp, revision.value, revision.smoothing_flag)
 ```
 
-The scalar values above only make the example runnable; select and validate noise parameters for each reservoir. See [configuration and tuning](Documentation/CONFIGURATION_AND_TUNING.md).
+The scalar values above only make the example runnable; select and validate noise parameters for each reservoir. See [configuration](Documentation/CONFIGURATION.md).
 
 ## Primary APIs
 
@@ -83,8 +83,6 @@ The scalar values above only make the example runnable; select and validate nois
 | `OnlineReservoirInflow` | You process one reservoir’s observations as they arrive. |
 | `OnlineReservoirInflow.from_config` | You need a configured, checkpoint-capable streaming estimator. |
 | `OnlineInflowPipeline` | You are integrating a custom backend or smoother. |
-| `tune_inflow_model` | You want a per-reservoir configuration selected from a storage/outflow dataframe. |
-| `tune_reservoirs` | You want independent configurations for many reservoirs, optionally in parallel. |
 | Notebook-local `validation.py` | You want hourly proxy-agreement, lag, and storage-closure validation tables and plots. |
 
 ## Documentation
@@ -92,7 +90,7 @@ The scalar values above only make the example runnable; select and validate nois
 - [Architecture](Documentation/ARCHITECTURE.md): modules, state-space model, units, and library boundaries.
 - [Model behavior](Documentation/INFLOW_MODEL_BEHAVIOR.md): input contract, initialization, missing values, and batch/streaming outputs.
 - [Online pipeline](Documentation/ONLINE_INFLOW_PIPELINE.md): lifecycle, checkpoints, and failure behavior.
-- [Configuration and tuning](Documentation/CONFIGURATION_AND_TUNING.md): complete configuration example, unit conventions, parameter selection, and tuning workflow.
+- [Configuration](Documentation/CONFIGURATION.md): complete configuration example, unit conventions, and parameter selection.
 - [Validation](Documentation/VALIDATION.md): regular comparison frames, upstream-proxy metrics, lag selection, and storage closure.
 
 ## Requirements and units

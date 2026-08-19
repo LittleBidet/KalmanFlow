@@ -14,7 +14,6 @@
 | `kalmone.core` | Public batch and reservoir-streaming adapters. |
 | `kalmone.reservoir_config` | Immutable, validated per-reservoir configuration. |
 | `kalmone.observations` / `flags` | Public input and output-provenance types. |
-| `kalmone.tuning` | Dataframe-first, bounded Q/R search and configuration persistence. |
 | `kalmone.units` | Volume/flow-rate conversion systems. |
 
 ## Reservoir state-space model
@@ -44,8 +43,7 @@ smoothing types remain available for advanced integrations.
 ## Data ownership and boundaries
 
 Kalmone does not read files, fetch data, parse timestamps, align series, or
-deduplicate records. The tuning module can explicitly save and load reviewed
-configuration artifacts, but it never saves observations or generated inflow
-results. The package validates the runtime contract—including timestamps,
+deduplicate records. Callers manage reviewed configuration artifacts; the
+package validates the runtime contract—including timestamps,
 matrix shapes, covariance properties, and missing observations—at the library
 boundary.

@@ -35,7 +35,7 @@ def _config(**overrides: object) -> ReservoirConfig:
         "inflow_units": InflowUnits.CUBIC_FEET_PER_SECOND,
         "model_version": "model-v1",
         "configuration_version": "config-v1",
-        "tuning_metadata": {"tunable": ["Q", "R"]},
+        "metadata": {"source": "test"},
     }
     values.update(overrides)
     return ReservoirConfig(**values)
@@ -207,26 +207,26 @@ class TestReservoirConfigPartitions:
     def test_metadata_is_frozen(self) -> None:
         source_array = np.array([1.0])
         config = _config(
-            tuning_metadata={"nested": {"array": source_array}},
+            metadata={"nested": {"array": source_array}},
         )
-        assert isinstance(config.tuning_metadata, MappingProxyType)
+        assert isinstance(config.metadata, MappingProxyType)
         with pytest.raises(TypeError):
-            config.tuning_metadata["new"] = "value"
+            config.metadata["new"] = "value"
         source_array[0] = 2.0
-        assert config.tuning_metadata["nested"]["array"][0] == 1.0
+        assert config.metadata["nested"]["array"][0] == 1.0
         with pytest.raises(ValueError):
-            config.tuning_metadata["nested"]["array"][0] = 2.0
+            config.metadata["nested"]["array"][0] = 2.0
 
     def test_covariance_arrays_are_read_only(self) -> None:
         config = _config()
         with pytest.raises(ValueError):
             config.q[0, 0] = 0.0
 
-    def test_with_tuned_noise_does_not_mutate_original(self) -> None:
+    def test_configuration_arrays_are_independent(self) -> None:
         config = _config()
-        tuned = config.with_tuned_noise(q=Q * 2.0, r=R * 3.0)
+        second_config = _config(q=Q * 2.0, r=R * 3.0)
         npt.assert_allclose(config.q, Q)
-        npt.assert_allclose(tuned.q, Q * 2.0)
+        npt.assert_allclose(second_config.q, Q * 2.0)
 
 
 class TestObservationPartitions:

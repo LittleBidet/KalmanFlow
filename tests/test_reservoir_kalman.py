@@ -37,7 +37,7 @@ def _config(**overrides: object) -> ReservoirConfig:
         "inflow_units": InflowUnits.CUBIC_FEET_PER_SECOND,
         "model_version": "model-v1",
         "configuration_version": "config-v1",
-        "tuning_metadata": {"tunable": ["Q", "R"]},
+        "metadata": {"source": "test"},
     }
     values.update(overrides)
     return ReservoirConfig(**values)
@@ -166,20 +166,17 @@ def test_unit_system_supports_si_and_rejects_invalid_conversion_factors() -> Non
         UnitSystem(flow_to_volume_per_second=0.0)
 
 
-def test_reservoir_config_freezes_arrays_metadata_and_tunes_only_q_r() -> None:
+def test_reservoir_config_freezes_arrays_and_metadata() -> None:
     config = _config()
-    tuned = config.with_tuned_noise(q=Q * 2.0, r=R * 3.0)
 
-    npt.assert_allclose(tuned.q, Q * 2.0)
-    npt.assert_allclose(tuned.r, R * 3.0)
-    npt.assert_allclose(tuned.p0, config.p0)
-    assert tuned.smoothing_lag == config.smoothing_lag
-    assert tuned.tuning_metadata["tunable"] == ("Q", "R")
+    npt.assert_allclose(config.q, Q)
+    npt.assert_allclose(config.r, R)
+    assert config.metadata["source"] == "test"
 
     with pytest.raises(ValueError):
         config.q[0, 0] = 0.0
     with pytest.raises(TypeError):
-        config.tuning_metadata["new"] = "value"
+        config.metadata["new"] = "value"
 
 
 @pytest.mark.parametrize(

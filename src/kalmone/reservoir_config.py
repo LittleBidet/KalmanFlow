@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import StrEnum
 from types import MappingProxyType
@@ -30,7 +30,7 @@ class InflowUnits(StrEnum):
 
 
 def _freeze_metadata(value: Any) -> Any:
-    """Make nested tuning metadata immutable without changing its values."""
+    """Make nested configuration metadata immutable without changing its values."""
 
     if isinstance(value, np.ndarray):
         array = np.asarray(value).copy()
@@ -67,7 +67,7 @@ class ReservoirConfig:
     inflow_units: InflowUnits
     model_version: str
     configuration_version: str
-    tuning_metadata: Mapping[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
     unit_system: UnitSystem = field(default_factory=UnitSystem.us_customary)
 
     def __post_init__(self) -> None:
@@ -113,18 +113,6 @@ class ReservoirConfig:
         )
         object.__setattr__(self, "inflow_units", inflow_units)
         object.__setattr__(
-            self, "tuning_metadata", _freeze_metadata(self.tuning_metadata)
+            self, "metadata", _freeze_metadata(self.metadata)
         )
         object.__setattr__(self, "unit_system", self.unit_system)
-
-    def with_tuned_noise(
-        self,
-        *,
-        q: Array,
-        r: Array,
-        tuning_metadata: Mapping[str, Any] | None = None,
-    ) -> ReservoirConfig:
-        """Return a new configuration with only the tunable Q/R fields replaced."""
-
-        metadata = self.tuning_metadata if tuning_metadata is None else tuning_metadata
-        return replace(self, q=q, r=r, tuning_metadata=metadata)
