@@ -1,4 +1,4 @@
-"""Convenience adapter for pandas reservoir-observation frames."""
+"""Convenience adapter for pandas."""
 
 from __future__ import annotations
 
@@ -28,14 +28,6 @@ def run_inflow_model(
     but are never returned. The result contains only causal ``estimated_inflow``
     values and absolute fixed-lag ``revised_inflow`` replacements.
     """
-
-    required = {"storage", "outflow"}
-    missing = required.difference(observations.columns)
-    if missing:
-        missing_columns = ", ".join(sorted(missing))
-        raise ValueError(
-            f"observations is missing required columns: {missing_columns}"
-        )
     return get_reservoir_inflow(
         observations["storage"],
         observations["outflow"],

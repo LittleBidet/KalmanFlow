@@ -86,6 +86,7 @@ The scalar values above only make the example runnable; select and validate nois
 | `OnlineReservoirInflow.from_config` | You need a configured, checkpoint-capable streaming estimator. |
 | `OnlineInflowPipeline` | You are integrating a custom backend or smoother. |
 | `tune_noise` | You want to optimize Q/R from a pre-cleaned historical record (requires the `tuning` extra). |
+| Notebook-local `validation.py` | You want hourly proxy-agreement, lag, and storage-closure validation tables and plots. |
 
 ## Documentation
 
@@ -93,6 +94,7 @@ The scalar values above only make the example runnable; select and validate nois
 - [Model behavior](Documentation/INFLOW_MODEL_BEHAVIOR.md): input contract, initialization, missing values, and batch/streaming outputs.
 - [Online pipeline](Documentation/ONLINE_INFLOW_PIPELINE.md): lifecycle, checkpoints, and failure behavior.
 - [Configuration and tuning](Documentation/CONFIGURATION_AND_TUNING.md): complete configuration example, unit conventions, parameter selection, and tuning workflow.
+- [Validation](Documentation/VALIDATION.md): regular comparison frames, upstream-proxy metrics, lag selection, and storage closure.
 
 ## Requirements and units
 
