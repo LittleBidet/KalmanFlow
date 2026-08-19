@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 sys.path.insert(
-    0, str(Path(__file__).parents[1] / "Notebooks" / "reservoir_pandas_api")
+    0, str(Path(__file__).parents[1] / "Notebooks")
 )
 
 from validation import (  # noqa: E402
