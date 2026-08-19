@@ -91,7 +91,39 @@ models = {
 }
 ```
 
+The default dataframe objective is
+`robust_multihorizon_student_t_predictive_negative_log_likelihood`. It uses
+one-, six-, and 24-hour causal forecast horizons with weights 0.50, 0.30, and
+0.20, Student-t degrees of freedom 5.0, and four validation blocks distributed
+through the record. Configure these with `forecast_horizons` (numeric values
+are hours, or use `timedelta`), `horizon_weights`,
+`student_t_degrees_of_freedom`, and `validation_blocks` on either tuning API.
+Each target is matched to the first future observation within half the median
+cadence. A forecast starts from the filtered state at its origin and does not
+assimilate observations between the origin and target, so neither tuning nor
+its inflow diagnostics use revised or centered estimates.
+
+The Student-t predictive NLL for observed component vector `e`, predictive
+covariance `S`, dimension `d`, and degrees of freedom `ν` is:
+
+```text
+lgamma(ν / 2) - lgamma((ν + d) / 2)
++ 0.5 logdet(S) + (d / 2) log(νπ)
++ ((ν + d) / 2) log1p(eᵀ S⁻¹ e / ν)
+```
+
+Each horizon is normalized by its usable observed scalar components, and
+weights are renormalized when a horizon is unavailable. The aggregate score is
+the median block loss, which limits the influence of a single storm or sensor
+failure period. Review the returned per-horizon counts and losses, per-block
+losses, skipped-forecast counts, and causal inflow roughness diagnostics.
+
 `tune_inflow_model` is the equivalent single-reservoir entry point. It returns
 the five selected parameters, immutable `ReservoirConfig`, score, evaluation
 count, diagnostics, and full model output. Tuning occurs offline; production
 runs should load versioned reviewed configurations.
+
+The legacy `tune_noise(..., objective="loglik")` adapter deliberately retains a
+separate one-step Gaussian scoring path for compatibility; its result must not
+be interpreted as the new dataframe objective. The dataframe-tuned
+configuration version is bumped when these tuning semantics change.

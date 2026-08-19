@@ -47,7 +47,28 @@ smoothing window is retained internally and is bounded by `max_window_steps`.
 
 `tune_inflow_model` selects diagonal continuous-time process noise (`q_storage`,
 `q_inflow`, `q_outflow`) and observation noise (`r_storage`, `r_outflow`) from
-storage and outflow only. It uses a bounded dataframe-first search over the
-mean one-step predictive negative log-likelihood, never mutates the input
-dataframe, and does not require SciPy. `tune_reservoirs` runs the same isolated
-process for a mapping of reservoirs and retains independent failures.
+storage and outflow only. One-step Gaussian likelihood can reward very small
+measurement noise and large inflow process noise because the filter can follow
+sensor noise immediately. The dataframe-first tuner therefore scores causal
+one-, six-, and 24-hour forecasts with a blocked multi-horizon Student-t
+predictive negative log-likelihood. The default horizon weights are 0.50,
+0.30, and 0.20; the horizons and weights are configurable.
+
+At every forecast origin, the tuner first assimilates observations through that
+origin, then propagates the filtered state to each target without assimilating
+the intervening observations. The target is the first future observation within
+half the reservoir's median cadence of the requested lead. Irregular timestamps
+use their actual elapsed seconds for every propagation. Missing storage or
+outflow components are omitted from the corresponding predictive likelihood.
+Student-t degrees of freedom default to 5.0 so isolated sensor spikes have less
+influence than under a Gaussian likelihood. Validation uses four contiguous
+blocks distributed through the tuning record, and candidate performance is the
+median block loss.
+
+All objective forecasts and inflow-behavior diagnostics use causal filtered
+inflows only; revised, centered, and fixed-lag-smoothed estimates are never
+used for tuning. Sensor-derived parameter bounds remain recommended because
+forecast scoring does not fully identify all five noise parameters. The tuner
+never mutates the input dataframe, does not require SciPy, and
+`tune_reservoirs` runs the same isolated process for a mapping of reservoirs
+while retaining independent failures.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -16,11 +17,14 @@ from kalmone import (
     tune_inflow_model,
     tune_reservoirs,
 )
+from kalmone.tuning import _prepare_arrays
+from kalmone.units import UnitSystem
 
 
 def _frame(*, count: int = 48, irregular: bool = False) -> pd.DataFrame:
     if irregular:
-        seconds = np.cumsum(np.resize(np.array([300, 900, 1_800, 600]), count))
+        elapsed = np.r_[0.0, np.resize(np.array([300, 900, 1_800, 600]), count - 1)]
+        seconds = np.cumsum(elapsed)
         index = pd.to_datetime("2025-01-01", utc=True) + pd.to_timedelta(
             seconds, unit="s"
         )
@@ -28,9 +32,85 @@ def _frame(*, count: int = 48, irregular: bool = False) -> pd.DataFrame:
         index = pd.date_range("2025-01-01", periods=count, freq="15min", tz="UTC")
     outflow = 15.0 + 1.5 * np.sin(np.linspace(0.0, 4.0, count))
     inflow = 19.0 + 3.0 * np.cos(np.linspace(0.0, 7.0, count))
-    elapsed = np.r_[0.0, np.diff(index.asi8) / 1_000_000_000.0]
+    elapsed = np.r_[0.0, (index[1:] - index[:-1]).total_seconds()]
     storage = 1_500.0 + np.cumsum((inflow - outflow) * elapsed / 43_560.0)
     return pd.DataFrame({"storage": storage, "outflow": outflow}, index=index)
+
+
+def _prepared(observations: pd.DataFrame):
+    return _prepare_arrays(
+        observations.index,
+        observations["storage"].to_numpy(),
+        observations["outflow"].to_numpy(),
+        unit_system=UnitSystem.us_customary(),
+        validation_fraction=0.25,
+    )
+
+
+def test_regular_15_minute_intervals_use_elapsed_seconds() -> None:
+    observations = _frame(count=4)
+    prepared = _prepared(observations)
+
+    np.testing.assert_allclose(prepared.elapsed_seconds, [900.0, 900.0, 900.0])
+    expected_initial_inflow = observations.outflow.iloc[0] + (
+        observations.storage.iloc[1] - observations.storage.iloc[0]
+    ) / (900.0 * UnitSystem.us_customary().flow_to_volume_per_second)
+    assert prepared.initial_state[1] == pytest.approx(expected_initial_inflow)
+
+
+def test_irregular_intervals_use_each_elapsed_seconds() -> None:
+    observations = _frame(count=4, irregular=True)
+    prepared = _prepared(observations)
+
+    np.testing.assert_allclose(prepared.elapsed_seconds, [300.0, 900.0, 1_800.0])
+    expected_initial_inflow = observations.outflow.iloc[0] + (
+        observations.storage.iloc[1] - observations.storage.iloc[0]
+    ) / (300.0 * UnitSystem.us_customary().flow_to_volume_per_second)
+    assert prepared.initial_state[1] == pytest.approx(expected_initial_inflow)
+
+
+def test_initialization_interval_uses_timedelta_between_selected_observations() -> None:
+    observations = _frame(count=4, irregular=True)
+    observations.loc[observations.index[1], "storage"] = np.nan
+    prepared = _prepared(observations)
+
+    expected_initial_inflow = observations.outflow.iloc[0] + (
+        observations.storage.iloc[2] - observations.storage.iloc[0]
+    ) / (1_200.0 * UnitSystem.us_customary().flow_to_volume_per_second)
+    assert prepared.initial_state[1] == pytest.approx(expected_initial_inflow)
+
+
+def test_resolution_equivalent_indexes_produce_equivalent_tuning_results() -> None:
+    observations = _frame(count=24)
+    equivalent = observations.copy()
+    equivalent.index = equivalent.index.as_unit("us")
+
+    nanosecond_result = tune_inflow_model(
+        observations, reservoir_id="lexington", max_evaluations=12
+    )
+    microsecond_result = tune_inflow_model(
+        equivalent, reservoir_id="lexington", max_evaluations=12
+    )
+
+    assert nanosecond_result.parameters == microsecond_result.parameters
+    assert nanosecond_result.score == microsecond_result.score
+    np.testing.assert_allclose(
+        nanosecond_result.config.q, microsecond_result.config.q
+    )
+    np.testing.assert_allclose(
+        nanosecond_result.config.p0, microsecond_result.config.p0
+    )
+    assert nanosecond_result.config.smoothing_lag == timedelta(seconds=5_400)
+
+
+def test_cadence_and_smoothing_lag_are_six_15_minute_intervals() -> None:
+    result = tune_inflow_model(_frame(), reservoir_id="lexington", max_evaluations=8)
+
+    assert result.diagnostics["median_interval_seconds"] == pytest.approx(900.0)
+    assert result.diagnostics["data_interval"]["median_seconds"] == pytest.approx(
+        900.0
+    )
+    assert result.config.smoothing_lag.total_seconds() == pytest.approx(5_400.0)
 
 
 def test_single_tuner_uses_storage_and_outflow_only_without_mutating_input() -> None:

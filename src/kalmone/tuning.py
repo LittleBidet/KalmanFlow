@@ -9,12 +9,12 @@ target or a measured observation.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import blake2b
-from math import ceil
+from math import ceil, lgamma
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
@@ -39,8 +39,12 @@ _PARAMETER_NAMES = (
 )
 _OBSERVATION_MATRIX = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
 _MODEL_VERSION = "reservoir-inflow-v1"
-_CONFIGURATION_VERSION = "dataframe-tuned-v1"
+_CONFIGURATION_VERSION = "dataframe-tuned-v2"
 _PERSISTENCE_VERSION = "reservoir-configurations-v1"
+_DEFAULT_FORECAST_HORIZONS_HOURS = (1.0, 6.0, 24.0)
+_DEFAULT_HORIZON_WEIGHTS = (0.50, 0.30, 0.20)
+_DEFAULT_STUDENT_T_DEGREES_OF_FREEDOM = 5.0
+_DEFAULT_VALIDATION_BLOCKS = 4
 
 
 class TuningError(ValueError):
@@ -214,6 +218,7 @@ class _PreparedData:
     initial_state: np.ndarray
     initial_covariance: np.ndarray
     score_mask: np.ndarray
+    score_start: int
     cadence_seconds: float
     raw_inflow: np.ndarray
     storage_count: int
@@ -225,6 +230,19 @@ class _FilterPass:
     score: float
     usable_observations: int
     log_likelihood: float
+    filter_result: KalmanFilterResult | None = None
+
+
+@dataclass(frozen=True)
+class _ForecastScore:
+    """A robust forecast score and its public diagnostic components."""
+
+    score: float
+    horizon_scores: Mapping[str, float | None]
+    horizon_counts: Mapping[str, int]
+    skipped_forecasts: Mapping[str, int]
+    block_scores: tuple[float | None, ...]
+    block_horizon_scores: tuple[Mapping[str, float | None], ...]
     filter_result: KalmanFilterResult | None = None
 
 
@@ -242,12 +260,24 @@ def tune_inflow_model(
     unit_system: UnitSystem | None = None,
     initial_parameters: Mapping[str, float] | Sequence[float] | None = None,
     parameter_bounds: Mapping[str, tuple[float, float]] | None = None,
+    forecast_horizons: Sequence[float | timedelta] = _DEFAULT_FORECAST_HORIZONS_HOURS,
+    horizon_weights: Mapping[object, float] | Sequence[float] | None = None,
+    student_t_degrees_of_freedom: float = _DEFAULT_STUDENT_T_DEGREES_OF_FREEDOM,
+    validation_blocks: int = _DEFAULT_VALIDATION_BLOCKS,
 ) -> InflowModelTuningResult:
     """Tune one reservoir from storage and outflow observations only.
 
-    The score is the mean one-step predictive negative log-likelihood over a
-    final contiguous validation fraction.  Candidate search is bounded in log
-    space and never changes ``observations``.
+    Candidate parameters are selected by blocked multi-horizon causal forecast
+    loss. Forecasts use the filtered state available at each origin, never a
+    revised or centered estimate. The default one-, six-, and 24-hour
+    horizons use a robust multivariate Student-t predictive negative
+    log-likelihood. Candidate search remains bounded in log space and never
+    changes ``observations``.
+
+    Numeric ``forecast_horizons`` values are hours; ``timedelta`` values are
+    accepted as well. A requested target is matched to the first observation
+    at or after that target when it is no more than half the median observation
+    cadence late. This tolerance is recorded in the returned diagnostics.
     """
 
     reservoir_id = _nonempty_name(reservoir_id, "reservoir_id")
@@ -260,6 +290,13 @@ def tune_inflow_model(
     tuning_rows = _positive_integer(max_tuning_rows, "max_tuning_rows", minimum=4)
     fraction = _validation_fraction(validation_fraction)
     seed = _integer_seed(random_state)
+    horizons, weights, horizon_labels = _forecast_configuration(
+        forecast_horizons, horizon_weights
+    )
+    degrees_of_freedom = _student_t_degrees_of_freedom(
+        student_t_degrees_of_freedom
+    )
+    block_count = _validation_block_count(validation_blocks)
     units = UnitSystem.us_customary() if unit_system is None else unit_system
     if not isinstance(units, UnitSystem):
         raise TypeError("unit_system must be a UnitSystem instance")
@@ -291,16 +328,73 @@ def tune_inflow_model(
         max_tuning_rows=tuning_rows,
         validation_fraction=fraction,
         random_state=seed,
+        forecast_horizons=horizons,
+        horizon_weights=weights,
+        student_t_degrees_of_freedom=degrees_of_freedom,
+        validation_blocks=block_count,
     )
     if not np.isfinite(score):
         raise TuningError("no finite candidate score was produced")
 
     values = dict(zip(_PARAMETER_NAMES, best_parameters, strict=True))
+    forecast_score = _score_multihorizon(
+        prepared,
+        best_parameters,
+        forecast_horizons=horizons,
+        horizon_weights=weights,
+        student_t_degrees_of_freedom=degrees_of_freedom,
+        validation_fraction=fraction,
+        validation_blocks=block_count,
+    )
+    filter_result = forecast_score.filter_result
+    if filter_result is None:
+        raise TuningError("winning candidate did not produce filter diagnostics")
+    inflow_diagnostics = _inflow_behavior_diagnostics(prepared, filter_result)
+    horizon_score_metadata = {
+        label: _json_number(forecast_score.horizon_scores[label])
+        for label in horizon_labels
+    }
+    horizon_count_metadata = {
+        label: int(forecast_score.horizon_counts[label]) for label in horizon_labels
+    }
+    skipped_metadata = {
+        label: int(forecast_score.skipped_forecasts[label])
+        for label in horizon_labels
+    }
     diagnostics = {
         "tuner": "dataframe-first",
-        "objective": "mean_one_step_predictive_negative_log_likelihood",
+        "objective": (
+            "robust_multihorizon_student_t_predictive_negative_log_likelihood"
+        ),
         "search_space": "bounded_logarithmic",
         "validation_fraction": fraction,
+        "validation_block_count": block_count,
+        "validation_blocks": block_count,
+        "validation_block_configuration": {
+            "count": block_count,
+            "fraction_per_block": fraction,
+            "selection": "contiguous blocks distributed across the record",
+        },
+        "forecast_horizons": [float(value / 3_600.0) for value in horizons],
+        "forecast_horizon_labels": list(horizon_labels),
+        "forecast_horizon_hours": [float(value / 3600.0) for value in horizons],
+        "horizon_weights": {
+            label: float(weight)
+            for label, weight in zip(horizon_labels, weights, strict=True)
+        },
+        "student_t_degrees_of_freedom": degrees_of_freedom,
+        "forecast_target_tolerance_seconds": prepared.cadence_seconds / 2.0,
+        "per_horizon_scores": horizon_score_metadata,
+        "per_horizon_usable_observation_count": horizon_count_metadata,
+        "per_horizon_skipped_forecasts": skipped_metadata,
+        "horizon_scores": horizon_score_metadata,
+        "horizon_counts": horizon_count_metadata,
+        "skipped_forecasts_by_horizon": skipped_metadata,
+        "per_block_scores": [
+            _json_number(value) for value in forecast_score.block_scores
+        ],
+        "aggregate_robust_forecast_score": float(forecast_score.score),
+        "aggregate_score": float(forecast_score.score),
         "random_seed": seed,
         "tuning_timestamp": datetime.now(UTC).isoformat(),
         "observation_count": len(prepared.index),
@@ -323,6 +417,8 @@ def tune_inflow_model(
         },
         "evaluations": evaluations,
         "final_score": score,
+        "inflow_behavior": inflow_diagnostics,
+        **inflow_diagnostics,
         **search_diagnostics,
     }
     config = _build_config(
@@ -358,6 +454,10 @@ def tune_reservoirs(
     unit_system: UnitSystem | None = None,
     initial_parameters: Mapping[str, float] | Sequence[float] | None = None,
     parameter_bounds: Mapping[str, tuple[float, float]] | None = None,
+    forecast_horizons: Sequence[float | timedelta] = _DEFAULT_FORECAST_HORIZONS_HOURS,
+    horizon_weights: Mapping[object, float] | Sequence[float] | None = None,
+    student_t_degrees_of_freedom: float = _DEFAULT_STUDENT_T_DEGREES_OF_FREEDOM,
+    validation_blocks: int = _DEFAULT_VALIDATION_BLOCKS,
     fail_fast: bool = False,
 ) -> ReservoirTuningBatch:
     """Tune independent configurations for a mapping of reservoir dataframes.
@@ -394,6 +494,10 @@ def tune_reservoirs(
             unit_system=unit_system,
             initial_parameters=initial_parameters,
             parameter_bounds=parameter_bounds,
+            forecast_horizons=forecast_horizons,
+            horizon_weights=horizon_weights,
+            student_t_degrees_of_freedom=student_t_degrees_of_freedom,
+            validation_blocks=validation_blocks,
         )
 
     if worker_count == 1:
@@ -528,10 +632,11 @@ def tune_noise(
     method: str = "dataframe-first",
     maxiter: int = 64,
 ) -> NoiseTuningResult:
-    """Compatibility wrapper for the retired array-oriented tuner.
+    """Compatibility wrapper retaining the legacy one-step Gaussian objective.
 
-    The former SciPy and RMSE paths are intentionally gone.  This wrapper uses
-    the dataframe-first predictive-likelihood tuner without requiring SciPy.
+    The former SciPy and RMSE paths are intentionally gone. This wrapper keeps
+    ``objective="loglik"`` semantically separate from the dataframe tuner's
+    robust multi-horizon Student-t objective and does not require SciPy.
     """
 
     if objective != "loglik":
@@ -550,29 +655,44 @@ def tune_noise(
         {"storage": np.asarray(data.storage), "outflow": np.asarray(data.discharge)},
         index=pd.DatetimeIndex(data.timestamps),
     )
-    result = tune_inflow_model(
-        frame,
-        reservoir_id=config.reservoir_id,
-        reservoir_name=config.reservoir_name,
+    index, storage, outflow = _extract_dataframe_inputs(
+        frame, storage_column="storage", outflow_column="outflow"
+    )
+    prepared = _prepare_arrays(
+        index,
+        storage,
+        outflow,
+        unit_system=config.unit_system,
+        validation_fraction=1.0,
+        initial_covariance=config.p0,
+        initial_positions=(0, 1),
+        burn_in_rows=1,
+    )
+    automatic = _initial_parameter_values(prepared)
+    initial_values_array = _apply_initial_parameters(automatic, initial_values)
+    lower, upper = _parameter_bounds(initial_values_array, None)
+    best, objective_value, evaluations, _ = _search_gaussian_parameters(
+        prepared,
+        initial=initial_values_array,
+        lower=lower,
+        upper=upper,
         max_evaluations=_positive_integer(maxiter, "maxiter"),
         max_tuning_rows=max(4, len(frame)),
         validation_fraction=1.0,
         random_state=0,
-        unit_system=config.unit_system,
-        initial_parameters=initial_values,
     )
     return NoiseTuningResult(
         objective="loglik",
-        q_storage=result.parameters["q_storage"],
-        q_inflow=result.parameters["q_inflow"],
-        q_outflow=result.parameters["q_outflow"],
-        r_storage=result.parameters["r_storage"],
-        r_outflow=result.parameters["r_outflow"],
-        objective_value=result.score,
+        q_storage=float(best[0]),
+        q_inflow=float(best[1]),
+        q_outflow=float(best[2]),
+        r_storage=float(best[3]),
+        r_outflow=float(best[4]),
+        objective_value=objective_value,
         success=True,
-        iterations=result.evaluations,
+        iterations=evaluations,
         method=method,
-        message="completed by dataframe-first bounded search",
+        message="completed by retained one-step Gaussian bounded search",
     )
 
 
@@ -629,8 +749,11 @@ def _prepare_arrays(
 ) -> _PreparedData:
     """Prepare immutable candidate-invariant arrays once per data resolution."""
 
+    index = _validate_datetime_index(index)
     storage_values = np.asarray(storage, dtype=float).copy()
     outflow_values = np.asarray(outflow, dtype=float).copy()
+    if storage_values.shape != (len(index),) or outflow_values.shape != (len(index),):
+        raise ValueError("storage and outflow must match the timestamp index")
 
     storage_positions = np.flatnonzero(np.isfinite(storage_values))
     outflow_positions = np.flatnonzero(np.isfinite(outflow_values))
@@ -643,12 +766,9 @@ def _prepare_arrays(
     else:
         first, second = initial_positions
 
-    timestamp_values = index.asi8.astype(np.int64)
-    elapsed = np.diff(timestamp_values).astype(float) / 1_000_000_000.0
+    elapsed = np.asarray((index[1:] - index[:-1]).total_seconds(), dtype=float)
     cadence = float(np.median(elapsed))
-    initial_elapsed = float(
-        (timestamp_values[second] - timestamp_values[first]) / 1_000_000_000.0
-    )
+    initial_elapsed = float((index[second] - index[first]).total_seconds())
     initial_outflow = (
         float(outflow_values[first])
         if np.isfinite(outflow_values[first])
@@ -695,6 +815,7 @@ def _prepare_arrays(
         ),
         initial_covariance=p0,
         score_mask=score_mask,
+        score_start=int(score_start),
         cadence_seconds=cadence,
         raw_inflow=raw_inflow,
         storage_count=int(np.isfinite(storage_values).sum()),
@@ -865,8 +986,84 @@ def _search_parameters(
     max_tuning_rows: int,
     validation_fraction: float,
     random_state: int,
+    forecast_horizons: tuple[float, ...],
+    horizon_weights: tuple[float, ...],
+    student_t_degrees_of_freedom: float,
+    validation_blocks: int,
 ) -> tuple[np.ndarray, float, int, dict[str, Any]]:
-    """Run a bounded, staged log-space search under a strict evaluation cap."""
+    """Run the bounded search using robust blocked forecast loss."""
+
+    return _bounded_log_search(
+        prepared,
+        initial=initial,
+        lower=lower,
+        upper=upper,
+        max_evaluations=max_evaluations,
+        max_tuning_rows=max_tuning_rows,
+        validation_fraction=validation_fraction,
+        random_state=random_state,
+        scorer=lambda data, values: _score_multihorizon(
+            data,
+            values,
+            forecast_horizons=forecast_horizons,
+            horizon_weights=horizon_weights,
+            student_t_degrees_of_freedom=student_t_degrees_of_freedom,
+            validation_fraction=validation_fraction,
+            validation_blocks=validation_blocks,
+        ).score,
+        minimum_forecast_rows=_minimum_forecast_prefix_rows(
+            prepared, max(forecast_horizons)
+        ),
+    )
+
+
+def _search_gaussian_parameters(
+    prepared: _PreparedData,
+    *,
+    initial: np.ndarray,
+    lower: np.ndarray,
+    upper: np.ndarray,
+    max_evaluations: int,
+    max_tuning_rows: int,
+    validation_fraction: float,
+    random_state: int,
+) -> tuple[np.ndarray, float, int, dict[str, Any]]:
+    """Run the retained one-step Gaussian search for ``tune_noise``."""
+
+    return _bounded_log_search(
+        prepared,
+        initial=initial,
+        lower=lower,
+        upper=upper,
+        max_evaluations=max_evaluations,
+        max_tuning_rows=max_tuning_rows,
+        validation_fraction=validation_fraction,
+        random_state=random_state,
+        scorer=lambda data, values: _filter_candidate(
+            data, values, collect=False
+        ).score,
+    )
+
+
+def _bounded_log_search(
+    prepared: _PreparedData,
+    *,
+    initial: np.ndarray,
+    lower: np.ndarray,
+    upper: np.ndarray,
+    max_evaluations: int,
+    max_tuning_rows: int,
+    validation_fraction: float,
+    random_state: int,
+    scorer: Callable[[_PreparedData, np.ndarray], float],
+    minimum_forecast_rows: int | None = None,
+) -> tuple[np.ndarray, float, int, dict[str, Any]]:
+    """Run a deterministic bounded, staged log-space search.
+
+    A complete score for one parameter vector consumes one evaluation. The
+    number of forecast origins inside that score is deliberately irrelevant
+    to the hard candidate-evaluation budget.
+    """
 
     rng = np.random.default_rng(random_state)
     log_lower, log_upper, log_initial = np.log(lower), np.log(upper), np.log(initial)
@@ -875,13 +1072,16 @@ def _search_parameters(
         raise TuningError(
             "max_tuning_rows is too small to include the required initial observations"
         )
+    prefix_floor = required_rows
+    if minimum_forecast_rows is not None and minimum_forecast_rows <= max_tuning_rows:
+        prefix_floor = max(prefix_floor, minimum_forecast_rows)
     small_rows = min(
         len(prepared.index),
-        max(required_rows, 4, min(max_tuning_rows, max_tuning_rows // 4)),
+        max(prefix_floor, 4, min(max_tuning_rows, max_tuning_rows // 4)),
     )
     medium_rows = min(
         len(prepared.index),
-        max(required_rows, small_rows, min(max_tuning_rows, max_tuning_rows * 3 // 4)),
+        max(prefix_floor, small_rows, min(max_tuning_rows, max_tuning_rows * 3 // 4)),
     )
     reduced_rows = min(len(prepared.index), max_tuning_rows)
     # Progressive stages are contiguous prefixes.  This lets every stage
@@ -907,7 +1107,7 @@ def _search_parameters(
             raise RuntimeError("evaluation budget exhausted")
         evaluations += 1
         values = np.exp(np.clip(log_values, log_lower, log_upper))
-        score = _filter_candidate(data, values, collect=False).score
+        score = scorer(data, values)
         return values, score
 
     if max_evaluations == 1:
@@ -1018,6 +1218,7 @@ def _prepared_prefix(
         initial_state=prepared.initial_state,
         initial_covariance=prepared.initial_covariance,
         score_mask=score_mask,
+        score_start=int(score_start),
         cadence_seconds=prepared.cadence_seconds,
         raw_inflow=prepared.raw_inflow[: count - 1],
         storage_count=int(np.isfinite(prepared.storage[:count]).sum()),
@@ -1032,6 +1233,524 @@ def _required_prefix_rows(prepared: _PreparedData) -> int:
         int(np.flatnonzero(np.isfinite(prepared.storage))[1]) + 1,
         int(np.flatnonzero(np.isfinite(prepared.outflow))[0]) + 1,
     )
+
+
+def _minimum_forecast_prefix_rows(
+    prepared: _PreparedData, longest_horizon_seconds: float
+) -> int | None:
+    """Find the shortest prefix that can score the longest requested lead."""
+
+    tolerance = prepared.cadence_seconds / 2.0
+    for origin in range(prepared.score_start, len(prepared.index) - 1):
+        target = _forecast_target_index(
+            prepared.index, origin, longest_horizon_seconds, tolerance
+        )
+        if target is not None:
+            return max(_required_prefix_rows(prepared), target + 1)
+    return None
+
+
+def _forecast_configuration(
+    horizons: Sequence[float | timedelta],
+    supplied_weights: Mapping[object, float] | Sequence[float] | None,
+) -> tuple[tuple[float, ...], tuple[float, ...], tuple[str, ...]]:
+    """Normalize public forecast horizons and relative weights."""
+
+    if isinstance(horizons, (str, bytes)):
+        raise TypeError("forecast_horizons must be a sequence of positive hours")
+    try:
+        values = tuple(horizons)
+    except TypeError as error:
+        raise TypeError("forecast_horizons must be a sequence") from error
+    if not values:
+        raise ValueError("forecast_horizons must contain at least one horizon")
+
+    seconds: list[float] = []
+    for horizon in values:
+        if isinstance(horizon, timedelta):
+            value = horizon.total_seconds()
+        else:
+            try:
+                value = float(horizon) * 3_600.0
+            except (TypeError, ValueError) as error:
+                raise TypeError(
+                    "forecast horizons must be hours or timedeltas"
+                ) from error
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError("forecast horizons must be positive and finite")
+        seconds.append(float(value))
+
+    labels = tuple(_horizon_label(value) for value in seconds)
+    if len(set(labels)) != len(labels):
+        raise ValueError("forecast_horizons must not contain duplicates")
+
+    if supplied_weights is None:
+        if len(seconds) == len(_DEFAULT_FORECAST_HORIZONS_HOURS) and all(
+            np.isclose(value / 3_600.0, default)
+            for value, default in zip(
+                seconds, _DEFAULT_FORECAST_HORIZONS_HOURS, strict=True
+            )
+        ):
+            weights = np.asarray(_DEFAULT_HORIZON_WEIGHTS, dtype=float)
+        else:
+            weights = np.full(len(seconds), 1.0 / len(seconds), dtype=float)
+    elif isinstance(supplied_weights, Mapping):
+        weights = np.empty(len(seconds), dtype=float)
+        normalized_keys = {_horizon_key(key): key for key in supplied_weights}
+        for position, (seconds_value, label) in enumerate(
+            zip(seconds, labels, strict=True)
+        ):
+            key = label
+            if key not in normalized_keys:
+                numeric_key = _horizon_key(seconds_value / 3_600.0)
+                if numeric_key in normalized_keys:
+                    key = numeric_key
+            if key not in normalized_keys:
+                raise ValueError(f"horizon_weights has no value for {label}")
+            weights[position] = float(supplied_weights[normalized_keys[key]])
+        unknown = set(normalized_keys).difference(
+            {_horizon_key(label) for label in labels}
+            | {_horizon_key(value / 3_600.0) for value in seconds}
+        )
+        if unknown:
+            raise ValueError("horizon_weights contains an unknown horizon")
+    else:
+        try:
+            weights = np.asarray(tuple(supplied_weights), dtype=float)
+        except (TypeError, ValueError) as error:
+            raise TypeError("horizon_weights must be a sequence or mapping") from error
+        if weights.shape != (len(seconds),):
+            raise ValueError("horizon_weights must match forecast_horizons")
+
+    if (
+        not np.all(np.isfinite(weights))
+        or np.any(weights <= 0.0)
+        or not np.isfinite(weights.sum())
+        or weights.sum() <= 0.0
+    ):
+        raise ValueError("horizon_weights must be positive and finite")
+    weights = weights / weights.sum()
+    return tuple(seconds), tuple(float(value) for value in weights), labels
+
+
+def _horizon_key(value: object) -> str:
+    if isinstance(value, timedelta):
+        value = value.total_seconds() / 3_600.0
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return _horizon_label(numeric * 3_600.0)
+
+
+def _horizon_label(seconds: float) -> str:
+    hours = seconds / 3_600.0
+    return f"{hours:g}h"
+
+
+def _student_t_degrees_of_freedom(value: object) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as error:
+        raise TypeError("student_t_degrees_of_freedom must be a number") from error
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError("student_t_degrees_of_freedom must be positive and finite")
+    return result
+
+
+def _validation_block_count(value: object) -> int:
+    return _positive_integer(value, "validation_blocks")
+
+
+def student_t_predictive_nll(
+    innovation: np.ndarray,
+    innovation_covariance: np.ndarray,
+    degrees_of_freedom: float = _DEFAULT_STUDENT_T_DEGREES_OF_FREEDOM,
+) -> float:
+    """Return multivariate Student-t predictive NLL for one observed target.
+
+    ``innovation_covariance`` is the predictive covariance of the observed
+    target components, including their measurement noise. Missing components
+    must be omitted before calling this function.
+    """
+
+    innovation_values = np.asarray(innovation, dtype=float)
+    covariance = np.asarray(innovation_covariance, dtype=float)
+    nu = _student_t_degrees_of_freedom(degrees_of_freedom)
+    if innovation_values.ndim != 1 or not len(innovation_values):
+        raise ValueError("innovation must be a non-empty one-dimensional array")
+    if covariance.shape != (len(innovation_values), len(innovation_values)):
+        raise ValueError("innovation_covariance has an incompatible shape")
+    if not np.all(np.isfinite(innovation_values)) or not np.all(
+        np.isfinite(covariance)
+    ):
+        raise ValueError("innovation and covariance must be finite")
+    covariance = 0.5 * (covariance + covariance.T)
+    try:
+        chol = np.linalg.cholesky(covariance)
+        solved = np.linalg.solve(chol, innovation_values)
+    except np.linalg.LinAlgError as error:
+        raise ValueError("innovation_covariance must be positive definite") from error
+    logdet = 2.0 * float(np.log(np.diag(chol)).sum())
+    mahalanobis = float(solved @ solved)
+    dimension = len(innovation_values)
+    result = (
+        lgamma(nu / 2.0)
+        - lgamma((nu + dimension) / 2.0)
+        + 0.5 * logdet
+        + (dimension / 2.0) * np.log(nu * np.pi)
+        + ((nu + dimension) / 2.0) * np.log1p(mahalanobis / nu)
+    )
+    if not np.isfinite(result):
+        raise ValueError("Student-t predictive NLL is not finite")
+    return float(result)
+
+
+def _student_t_nll(
+    innovation: np.ndarray,
+    innovation_covariance: np.ndarray,
+    degrees_of_freedom: float = _DEFAULT_STUDENT_T_DEGREES_OF_FREEDOM,
+) -> float:
+    """Private compatibility alias for the Student-t NLL helper."""
+
+    return student_t_predictive_nll(
+        innovation, innovation_covariance, degrees_of_freedom
+    )
+
+
+def _gaussian_predictive_nll(
+    innovation: np.ndarray, innovation_covariance: np.ndarray
+) -> float:
+    """Return the legacy one-step Gaussian predictive NLL."""
+
+    innovation_values = np.asarray(innovation, dtype=float)
+    covariance = np.asarray(innovation_covariance, dtype=float)
+    if covariance.shape != (len(innovation_values), len(innovation_values)):
+        raise ValueError("innovation_covariance has an incompatible shape")
+    sign, logdet = np.linalg.slogdet(covariance)
+    if sign <= 0.0 or not np.isfinite(logdet):
+        raise ValueError("innovation_covariance must be positive definite")
+    solved = np.linalg.solve(covariance, innovation_values)
+    result = 0.5 * (
+        len(innovation_values) * np.log(2.0 * np.pi)
+        + logdet
+        + float(innovation_values @ solved)
+    )
+    if not np.isfinite(result):
+        raise ValueError("Gaussian predictive NLL is not finite")
+    return float(result)
+
+
+def _forecast_target_index(
+    index: pd.DatetimeIndex,
+    origin: int,
+    horizon_seconds: float,
+    tolerance_seconds: float,
+) -> int | None:
+    """Find the nearest acceptable future observation without using integers."""
+
+    target = index[origin] + timedelta(seconds=float(horizon_seconds))
+    candidate = int(index.searchsorted(target, side="left"))
+    if candidate >= len(index):
+        return None
+    delay = float((index[candidate] - target).total_seconds())
+    if delay < 0.0 or delay > tolerance_seconds:
+        return None
+    return candidate
+
+
+def _validation_origin_blocks(
+    prepared: _PreparedData,
+    horizons: tuple[float, ...],
+    validation_fraction: float,
+    validation_blocks: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Select contiguous validation windows distributed through the record."""
+
+    tolerance = prepared.cadence_seconds / 2.0
+    origins = []
+    for origin in range(prepared.score_start, len(prepared.index) - 1):
+        if any(
+            _forecast_target_index(
+                prepared.index, origin, horizon, tolerance
+            )
+            is not None
+            for horizon in horizons
+        ):
+            origins.append(origin)
+    if not origins:
+        return ()
+    blocks: list[tuple[int, ...]] = []
+    for chunk in np.array_split(np.asarray(origins, dtype=int), validation_blocks):
+        if len(chunk) == 0:
+            continue
+        count = max(1, int(ceil(len(chunk) * validation_fraction)))
+        blocks.append(tuple(int(value) for value in chunk[-count:]))
+    return tuple(blocks)
+
+
+def _propagate_state(
+    prepared: _PreparedData,
+    parameters: np.ndarray,
+    state: np.ndarray,
+    covariance: np.ndarray,
+    origin: int,
+    target: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Propagate an origin state to a target without any observation updates."""
+
+    propagated_state = np.asarray(state, dtype=float).copy()
+    propagated_covariance = np.asarray(covariance, dtype=float).copy()
+    for step in range(origin, target):
+        process = (
+            parameters[0] * prepared.storage_basis[step]
+            + parameters[1] * prepared.inflow_basis[step]
+            + parameters[2] * prepared.outflow_basis[step]
+        )
+        transition = prepared.transitions[step]
+        transitioned_covariance = (
+            transition @ propagated_covariance @ transition.T + process
+        )
+        propagated_state = transition @ propagated_state
+        propagated_covariance = 0.5 * (
+            transitioned_covariance + transitioned_covariance.T
+        )
+        if not np.all(np.isfinite(propagated_state)) or not np.all(
+            np.isfinite(propagated_covariance)
+        ):
+            raise ValueError("non-finite forecast covariance")
+    return propagated_state, propagated_covariance
+
+
+def _score_multihorizon(
+    prepared: _PreparedData,
+    parameters: np.ndarray,
+    *,
+    forecast_horizons: tuple[float, ...],
+    horizon_weights: tuple[float, ...],
+    student_t_degrees_of_freedom: float,
+    validation_fraction: float,
+    validation_blocks: int,
+) -> _ForecastScore:
+    """Score causal multi-horizon forecasts without assimilating their paths."""
+
+    labels = tuple(_horizon_label(value) for value in forecast_horizons)
+    empty_scores = {label: None for label in labels}
+    empty_counts = {label: 0 for label in labels}
+    empty_skips = {label: 0 for label in labels}
+    values = np.asarray(parameters, dtype=float)
+    if values.shape != (5,) or not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+        return _ForecastScore(
+            float("inf"), empty_scores, empty_counts, empty_skips, (), ()
+        )
+
+    filter_pass = _filter_candidate(prepared, values, collect=True)
+    if filter_pass.filter_result is None:
+        return _ForecastScore(
+            float("inf"), empty_scores, empty_counts, empty_skips, (), ()
+        )
+    result = filter_pass.filter_result
+    blocks = _validation_origin_blocks(
+        prepared, forecast_horizons, validation_fraction, validation_blocks
+    )
+    if not blocks:
+        return _ForecastScore(
+            float("inf"), empty_scores, empty_counts, empty_skips, (), (), result
+        )
+
+    measurement_covariance = np.diag(values[3:])
+    total_nll = {label: 0.0 for label in labels}
+    block_scores: list[float | None] = []
+    block_horizon_scores: list[Mapping[str, float | None]] = []
+    block_counts: list[dict[str, int]] = []
+    global_skips = {label: 0 for label in labels}
+
+    try:
+        for block in blocks:
+            current_counts = {label: 0 for label in labels}
+            current_nll = {label: 0.0 for label in labels}
+            for origin in block:
+                origin_state = result.filtered_means[origin].copy()
+                origin_covariance = result.filtered_covariances[origin].copy()
+                if not np.all(np.isfinite(origin_state)) or not np.all(
+                    np.isfinite(origin_covariance)
+                ):
+                    return _ForecastScore(
+                        float("inf"),
+                        empty_scores,
+                        empty_counts,
+                        empty_skips,
+                        (),
+                        (),
+                        result,
+                    )
+
+                targets = {
+                    label: _forecast_target_index(
+                        prepared.index,
+                        origin,
+                        horizon,
+                        prepared.cadence_seconds / 2.0,
+                    )
+                    for label, horizon in zip(
+                        labels, forecast_horizons, strict=True
+                    )
+                }
+                target_states: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+                for target in sorted(
+                    {value for value in targets.values() if value is not None}
+                ):
+                    assert target is not None
+                    target_states[target] = _propagate_state(
+                        prepared,
+                        values,
+                        origin_state,
+                        origin_covariance,
+                        origin,
+                        target,
+                    )
+
+                for label in labels:
+                    target = targets[label]
+                    if target is None:
+                        global_skips[label] += 1
+                        continue
+                    observation = np.array(
+                        [prepared.storage[target], prepared.outflow[target]],
+                        dtype=float,
+                    )
+                    observed = np.isfinite(observation)
+                    if not np.any(observed):
+                        global_skips[label] += 1
+                        continue
+                    forecast_state, forecast_covariance = target_states[target]
+                    h = _OBSERVATION_MATRIX[observed]
+                    innovation = observation[observed] - h @ forecast_state
+                    predictive_covariance = 0.5 * (
+                        h @ forecast_covariance @ h.T
+                        + measurement_covariance[np.ix_(observed, observed)]
+                        + (
+                            h @ forecast_covariance @ h.T
+                            + measurement_covariance[np.ix_(observed, observed)]
+                        ).T
+                    )
+                    loss = student_t_predictive_nll(
+                        innovation,
+                        predictive_covariance,
+                        student_t_degrees_of_freedom,
+                    )
+                    current_nll[label] += loss
+                    current_counts[label] += int(observed.sum())
+                    total_nll[label] += loss
+            horizon_scores = {
+                label: (
+                    current_nll[label] / current_counts[label]
+                    if current_counts[label]
+                    else None
+                )
+                for label in labels
+            }
+            block_score = _weighted_horizon_score(
+                horizon_scores, current_counts, horizon_weights, labels
+            )
+            block_scores.append(_json_number(block_score))
+            block_horizon_scores.append(horizon_scores)
+            block_counts.append(current_counts)
+    except (FloatingPointError, np.linalg.LinAlgError, ValueError):
+        return _ForecastScore(
+            float("inf"), empty_scores, empty_counts, empty_skips, (), (), result
+        )
+
+    horizon_counts = {
+        label: int(sum(counts[label] for counts in block_counts)) for label in labels
+    }
+    horizon_scores = {
+        label: (
+            total_nll[label] / horizon_counts[label]
+            if horizon_counts[label]
+            else None
+        )
+        for label in labels
+    }
+    usable_blocks = [score for score in block_scores if score is not None]
+    if not any(horizon_counts.values()) or not usable_blocks:
+        score = float("inf")
+    else:
+        score = float(np.median(np.asarray(usable_blocks, dtype=float)))
+    return _ForecastScore(
+        score,
+        horizon_scores,
+        horizon_counts,
+        global_skips,
+        tuple(block_scores),
+        tuple(block_horizon_scores),
+        result,
+    )
+
+
+def _weighted_horizon_score(
+    horizon_scores: Mapping[str, float | None],
+    horizon_counts: Mapping[str, int],
+    weights: tuple[float, ...],
+    labels: tuple[str, ...],
+) -> float | None:
+    """Weight usable horizons only, renormalizing when one is unavailable."""
+
+    usable = [
+        position
+        for position, label in enumerate(labels)
+        if horizon_counts[label] > 0 and horizon_scores[label] is not None
+    ]
+    if not usable:
+        return None
+    denominator = float(sum(weights[position] for position in usable))
+    return float(
+        sum(
+            weights[position] * float(horizon_scores[labels[position]])
+            for position in usable
+        )
+        / denominator
+    )
+
+
+def _inflow_behavior_diagnostics(
+    prepared: _PreparedData, filter_result: KalmanFilterResult
+) -> dict[str, float | None]:
+    """Summarize only the causal filtered inflow and raw water balance."""
+
+    causal = np.asarray(filter_result.filtered_means[:, 1], dtype=float)
+    finite_causal = causal[np.isfinite(causal)]
+    adjacent = causal[1:] - causal[:-1]
+    adjacent = adjacent[np.isfinite(adjacent)]
+    raw = np.asarray(prepared.raw_inflow, dtype=float)
+    finite_raw = raw[np.isfinite(raw)]
+    causal_std = float(np.std(finite_causal)) if len(finite_causal) else None
+    raw_std = float(np.std(finite_raw)) if len(finite_raw) else None
+    ratio = (
+        causal_std / raw_std
+        if causal_std is not None and raw_std is not None and raw_std > 0.0
+        else None
+    )
+    return {
+        "median_absolute_causal_inflow_change": (
+            float(np.median(np.abs(adjacent))) if len(adjacent) else None
+        ),
+        "p95_absolute_causal_inflow_change": (
+            float(np.percentile(np.abs(adjacent), 95.0)) if len(adjacent) else None
+        ),
+        "causal_inflow_std": causal_std,
+        "raw_water_balance_inflow_std": raw_std,
+        "filtered_to_raw_std_ratio": ratio,
+        "negative_causal_inflow_fraction": (
+            float(np.mean(finite_causal < 0.0)) if len(finite_causal) else None
+        ),
+    }
+
+
+def _json_number(value: float | None) -> float | None:
+    if value is None or not np.isfinite(value):
+        return None
+    return float(value)
 
 
 def _filter_candidate(
@@ -1112,18 +1831,10 @@ def _filter_candidate(
                     + observed_r
                     + (h @ predicted_covariance @ h.T + observed_r).T
                 )
-                sign, logdet = np.linalg.slogdet(innovation_covariance)
-                if sign <= 0.0 or not np.isfinite(logdet):
-                    return _FilterPass(float("inf"), usable, float("-inf"))
-                solved_innovation = np.linalg.solve(innovation_covariance, innovation)
+                nll = _gaussian_predictive_nll(innovation, innovation_covariance)
                 kalman_gain = np.linalg.solve(
                     innovation_covariance, (predicted_covariance @ h.T).T
                 ).T
-                nll = 0.5 * (
-                    len(innovation) * np.log(2.0 * np.pi)
-                    + logdet
-                    + float(innovation @ solved_innovation)
-                )
                 if not np.isfinite(nll):
                     return _FilterPass(float("inf"), usable, float("-inf"))
                 total_likelihood_nll += nll
@@ -1154,7 +1865,7 @@ def _filter_candidate(
                 assert filtered_means is not None and filtered_covariances is not None
                 filtered_means[row] = state
                 filtered_covariances[row] = covariance
-    except FloatingPointError, np.linalg.LinAlgError, ValueError:
+    except (FloatingPointError, np.linalg.LinAlgError, ValueError):
         return _FilterPass(float("inf"), usable, float("-inf"))
 
     score = float(total_score_nll / usable) if usable else float("inf")
