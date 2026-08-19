@@ -45,4 +45,9 @@ smoothing window is retained internally and is bounded by `max_window_steps`.
 
 `ReservoirConfig` is immutable. It holds a reservoir identifier, model and configuration versions, continuous-time `q` (3×3), measurement covariance `r` (2×2), initial covariance `p0` (3×3), a positive smoothing lag, units, and metadata. Covariances must be finite, symmetric, positive semidefinite; the diagonal of `r` must be strictly positive.
 
-`tune_noise` optionally uses SciPy to fit diagonal continuous-time process noise (`q_storage`, `q_inflow`, `q_outflow`) and observation noise (`r_storage`, `r_outflow`) in log space. It supports `loglik` and `rmse` objectives, returns a `NoiseTuningResult`, and never mutates a configuration. Install it with `pip install 'kalmone[tuning]'` or the project's optional `tuning` extra.
+`tune_inflow_model` selects diagonal continuous-time process noise (`q_storage`,
+`q_inflow`, `q_outflow`) and observation noise (`r_storage`, `r_outflow`) from
+storage and outflow only. It uses a bounded dataframe-first search over the
+mean one-step predictive negative log-likelihood, never mutates the input
+dataframe, and does not require SciPy. `tune_reservoirs` runs the same isolated
+process for a mapping of reservoirs and retains independent failures.

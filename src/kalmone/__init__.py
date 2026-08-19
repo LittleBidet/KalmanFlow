@@ -36,10 +36,20 @@ from .reservoir_config import (
 )
 from .rts import OnlineFixedLagRTS, SmoothedStep, smooth_filter_steps
 from .tuning import (
+    BatchTuningResult,
+    InflowModelTuningResult,
     NoiseTuningData,
     NoiseTuningResult,
+    ReservoirTuningBatch,
+    TuningError,
+    TuningFailure,
+    TuningResult,
+    load_reservoir_configs,
     run_filter_with_noise,
+    save_reservoir_configs,
+    tune_inflow_model,
     tune_noise,
+    tune_reservoirs,
 )
 from .units import CFS_TO_ACRE_FEET_PER_SECOND, UnitSystem
 
@@ -64,8 +74,14 @@ __all__ = [
     "SmoothedStep",
     "StateSpaceModel",
     "UnitSystem",
+    "BatchTuningResult",
+    "InflowModelTuningResult",
     "NoiseTuningData",
     "NoiseTuningResult",
+    "ReservoirTuningBatch",
+    "TuningError",
+    "TuningFailure",
+    "TuningResult",
     "OnlineReservoirInflow",
     "OutputFlag",
     "ReservoirFlowEstimate",
@@ -75,9 +91,13 @@ __all__ = [
     "initial_filter_step",
     "kalman_filter",
     "kalman_step",
+    "load_reservoir_configs",
     "predict_state",
     "run_filter_with_noise",
     "run_inflow_model",
+    "save_reservoir_configs",
     "smooth_filter_steps",
+    "tune_inflow_model",
     "tune_noise",
+    "tune_reservoirs",
 ]

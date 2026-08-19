@@ -60,47 +60,38 @@ All covariance matrices must be finite, symmetric, and positive semidefinite. Th
 
 `UnitSystem.us_customary()` uses acre-feet and cfs; `UnitSystem.si()` uses m³ and m³/s. A custom `UnitSystem` must supply a positive `flow_to_volume_per_second` conversion that matches the storage unit.
 
-## Choosing initial values
-
-Start from data quality and expected variability, then validate against historical periods that include stable conditions and storms.
-
-- Set `r[0, 0]` near the variance of storage measurement error, in squared storage units.
-- Set `r[1, 1]` near the variance of measured discharge error, in squared flow-rate units.
-- Use `q[1, 1]` and `q[2, 2]` to control how quickly the estimated inflow and true outflow rates can change. Larger values react faster but can follow noise.
-- Use `q[0, 0]` only when unmodelled storage movement or storage-model error needs explicit process uncertainty.
-- Set `p0` large enough to reflect uncertainty at stream startup; avoid treating arbitrary initial rate estimates as precise.
-
-There is no portable numeric range for these terms: their magnitudes depend on the selected units, sampling cadence, reservoir scale, sensor precision, and operating regime. Record the data interval, units, objective, and validation result in `tuning_metadata`.
-
 ## Tuning workflow
 
-1. Prepare a representative historical interval with timezone-aware, strictly increasing timestamps. The first two storage readings and first discharge reading must be finite; later storage or discharge samples may be `NaN`.
-2. Create `NoiseTuningData` and a baseline `ReservoirConfig`.
-3. Run `tune_noise` using `loglik` for the joint likelihood fit, or `rmse` for standardized one-step innovation RMSE.
-4. Review the returned values and behavior on a separate holdout period before promoting them.
-5. Create a new immutable configuration using `config.with_tuned_noise(...)`; persist the configuration and its metadata in the calling application.
+1. Prepare a representative dataframe with a timezone-aware, strictly increasing `DatetimeIndex` and `storage` and `outflow` columns. Missing components may remain `NaN`.
+2. Run the dataframe-first tuner. It estimates robust starting values from storage and outflow differences, raw water-balance inflow, cadence, and variability; raw inflow is never treated as a measured target.
+3. Review the independent configuration and its predictive score before promotion.
+4. Explicitly save the reviewed configurations. The file contains configuration and tuning metadata only, never observations or inflow output.
 
 ```python
-import numpy as np
-from kalmone import NoiseTuningData, tune_noise
-
-data = NoiseTuningData(
-    timestamps=tuple(storage.index.to_pydatetime()),
-    storage=storage.to_numpy(dtype=float),
-    discharge=discharge.to_numpy(dtype=float),
+from kalmone import (
+    OnlineReservoirInflow,
+    load_reservoir_configs,
+    tune_reservoirs,
 )
 
-result = tune_noise(config, data, objective="loglik", maxiter=500)
-candidate = config.with_tuned_noise(
-    q=np.diag([result.q_storage, result.q_inflow, result.q_outflow]),
-    r=np.diag([result.r_storage, result.r_outflow]),
-    tuning_metadata={
-        "objective": result.objective,
-        "objective_value": result.objective_value,
-        "method": result.method,
-        "iterations": result.iterations,
+batch = tune_reservoirs(
+    {
+        "lexington": lexington_dataframe,
+        "anderson": anderson_dataframe,
     },
+    max_evaluations=64,
+    max_tuning_rows=5_000,
+    workers=2,
 )
+batch.save("reservoir-configurations.json")
+configs = load_reservoir_configs("reservoir-configurations.json")
+models = {
+    reservoir_id: OnlineReservoirInflow.from_config(config)
+    for reservoir_id, config in configs.items()
+}
 ```
 
-`tune_noise` never changes `config` and does not save results. The caller owns review, versioning, approval, and persistence.
+`tune_inflow_model` is the equivalent single-reservoir entry point. It returns
+the five selected parameters, immutable `ReservoirConfig`, score, evaluation
+count, diagnostics, and full model output. Tuning occurs offline; production
+runs should load versioned reviewed configurations.

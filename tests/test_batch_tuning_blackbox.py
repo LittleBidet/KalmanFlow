@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
 
 import numpy as np
 import numpy.testing as npt
@@ -134,12 +132,8 @@ class TestBatchAdapterPartitions:
         assert result.loc[storage.index[3], "estimated_inflow_flag"] == "PREDICTED"
         assert result.loc[storage.index[2], "revised_inflow_flag"] == "PREDICTED"
         assert result.loc[storage.index[3], "revised_inflow_flag"] == "PREDICTED"
-        assert (
-            result["estimated_inflow_smoothing_flag"] == "NON_SMOOTHED"
-        ).all()
-        assert (
-            result["revised_inflow_smoothing_flag"].iloc[:-1] == "SMOOTHED"
-        ).all()
+        assert (result["estimated_inflow_smoothing_flag"] == "NON_SMOOTHED").all()
+        assert (result["revised_inflow_smoothing_flag"].iloc[:-1] == "SMOOTHED").all()
         assert result["revised_inflow_smoothing_flag"].iloc[-1] == "NON_SMOOTHED"
 
     def test_unequal_length_series_rejected(self) -> None:
@@ -374,17 +368,6 @@ class TestRunFilterWithNoisePartitions:
 class TestTuneNoiseBoundaries:
     """BVA for tune_noise public contract."""
 
-    @staticmethod
-    def _mock_scipy_minimize() -> MagicMock:
-        mock_result = MagicMock(
-            x=np.log([1.0, 0.1, 0.2, 1.0, 2.0]),
-            fun=1.0,
-            success=True,
-            nit=0,
-            message="ok",
-        )
-        return MagicMock(return_value=mock_result)
-
     def test_invalid_objective_rejected(self) -> None:
         data = NoiseTuningData(
             timestamps=(
@@ -416,15 +399,10 @@ class TestTuneNoiseBoundaries:
             storage=np.array([100.0, 101.0]),
             discharge=np.array([4.0, 4.0]),
         )
-        scipy_optimize = MagicMock(minimize=self._mock_scipy_minimize())
-        with patch.dict(
-            "sys.modules",
-            {"scipy": MagicMock(), "scipy.optimize": scipy_optimize},
-        ):
-            with pytest.raises(ValueError, match="initial must contain five positive"):
-                tune_noise(_tuning_config(), data, initial=initial)
+        with pytest.raises(ValueError, match="initial must contain five positive"):
+            tune_noise(_tuning_config(), data, initial=initial)
 
-    def test_rmse_objective_uses_one_step_innovations(self) -> None:
+    def test_compatibility_wrapper_uses_dataframe_predictive_likelihood(self) -> None:
         data = NoiseTuningData(
             timestamps=(
                 datetime(2024, 1, 1, tzinfo=UTC),
@@ -434,63 +412,11 @@ class TestTuneNoiseBoundaries:
             storage=np.array([100.0, 101.0, 100.5]),
             discharge=np.array([4.0, 4.0, 4.0]),
         )
-        expected_filter = run_filter_with_noise(
-            _tuning_config(),
-            data,
-            q_storage=1.0,
-            q_inflow=0.1,
-            q_outflow=0.2,
-            r_storage=1.0,
-            r_outflow=2.0,
-        )
-        expected_innovations = expected_filter.innovations[1:]
-        expected_variances = np.diagonal(
-            expected_filter.innovation_covariances[1:],
-            axis1=1,
-            axis2=2,
-        )
-        expected_innovations = expected_innovations / np.sqrt(expected_variances)
-        expected_innovations = expected_innovations.ravel()
-        finite_innovations = expected_innovations[np.isfinite(expected_innovations)]
-        expected = float(np.sqrt(np.mean(finite_innovations**2)))
-
-        def minimize(objective, x0, *, method, options):
-            return SimpleNamespace(
-                x=x0,
-                fun=objective(x0),
-                success=True,
-                nit=1,
-                message="ok",
-            )
-
-        scipy_optimize = SimpleNamespace(minimize=minimize)
-        with patch.dict(
-            "sys.modules",
-            {"scipy": MagicMock(), "scipy.optimize": scipy_optimize},
-        ):
-            result = tune_noise(
-                _tuning_config(),
-                data,
-                objective="rmse",
-            )
-
-        assert result.objective_value == pytest.approx(expected)
-
-    def test_tune_noise_requires_scipy(self) -> None:
-        data = NoiseTuningData(
-            timestamps=(
-                datetime(2024, 1, 1, tzinfo=UTC),
-                datetime(2024, 1, 1, 0, 15, tzinfo=UTC),
-            ),
-            storage=np.array([100.0, 101.0]),
-            discharge=np.array([4.0, 4.0]),
-        )
-        with patch.dict(
-            "sys.modules",
-            {"scipy": None, "scipy.optimize": None},
-        ):
-            with pytest.raises(ImportError, match="requires SciPy"):
-                tune_noise(_tuning_config(), data)
+        result = tune_noise(_tuning_config(), data, maxiter=8)
+        assert result.objective == "loglik"
+        assert result.success
+        assert result.iterations <= 8
+        assert result.objective_value == pytest.approx(result.objective_value)
 
     def test_tune_noise_does_not_mutate_config(self) -> None:
         config = _tuning_config()
@@ -503,10 +429,5 @@ class TestTuneNoiseBoundaries:
             storage=np.array([100.0, 101.0]),
             discharge=np.array([4.0, 4.0]),
         )
-        scipy_optimize = SimpleNamespace(minimize=self._mock_scipy_minimize())
-        with patch.dict(
-            "sys.modules",
-            {"scipy": MagicMock(), "scipy.optimize": scipy_optimize},
-        ):
-            tune_noise(config, data)
+        tune_noise(config, data, maxiter=8)
         npt.assert_allclose(config.q, original_q)

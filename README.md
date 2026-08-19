@@ -28,8 +28,6 @@ deployment.
 
 ```bash
 pip install kalmone
-# Optional Q/R tuning support
-pip install 'kalmone[tuning]'
 ```
 
 For development in this repository:
@@ -85,7 +83,8 @@ The scalar values above only make the example runnable; select and validate nois
 | `OnlineReservoirInflow` | You process one reservoir’s observations as they arrive. |
 | `OnlineReservoirInflow.from_config` | You need a configured, checkpoint-capable streaming estimator. |
 | `OnlineInflowPipeline` | You are integrating a custom backend or smoother. |
-| `tune_noise` | You want to optimize Q/R from a pre-cleaned historical record (requires the `tuning` extra). |
+| `tune_inflow_model` | You want a per-reservoir configuration selected from a storage/outflow dataframe. |
+| `tune_reservoirs` | You want independent configurations for many reservoirs, optionally in parallel. |
 | Notebook-local `validation.py` | You want hourly proxy-agreement, lag, and storage-closure validation tables and plots. |
 
 ## Documentation
