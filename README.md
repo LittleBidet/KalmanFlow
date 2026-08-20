@@ -92,6 +92,7 @@ The scalar values above only make the example runnable; select and validate nois
 - [Online pipeline](Documentation/ONLINE_INFLOW_PIPELINE.md): lifecycle, checkpoints, and failure behavior.
 - [Configuration](Documentation/CONFIGURATION.md): complete configuration example, unit conventions, and parameter selection.
 - [Validation](Documentation/VALIDATION.md): regular comparison frames, upstream-proxy metrics, lag selection, and storage closure.
+- [Process-noise tuning plan](Documentation/IMPLEMENTATION_PLAN_PROCESS_NOISE_TUNING.md): causal candidate selection and untouched-test protocol.
 
 ## Requirements and units
 

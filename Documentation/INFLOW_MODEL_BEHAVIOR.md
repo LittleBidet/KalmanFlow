@@ -48,3 +48,17 @@ smoothing window is retained internally and is bounded by `max_window_steps`.
 Select and review continuous-time process noise (`q`), observation noise (`r`),
 and initial covariance (`p0`) for each reservoir before operational use.
 Document the rationale and configuration version in the configuration metadata.
+
+## Causal process-noise evaluation
+
+`tune_inflow_process_noise` is an offline calibration aid, not an adaptive
+streaming mode. It uses the forward Kalman filter and never calls the RTS
+smoother. Initialization rows and the configured warm-up period are excluded
+from scores. Validation observations can condition later predictions, as they
+would in operation, but cannot affect their own or earlier scores.
+
+Use `evaluate_inflow_config` once a proposed configuration is frozen for a
+separate, untouched test period. Test results must not be used to change the
+candidate grid, windows, thresholds, or selected parameter. Filtered storage
+closure is a reconstruction diagnostic; it is not an independent predictive
+score when the ending storage observation has already been assimilated.

@@ -35,6 +35,21 @@ from .reservoir_config import (
     ReservoirConfig,
 )
 from .rts import OnlineFixedLagRTS, SmoothedStep, smooth_filter_steps
+from .tuning import (
+    InflowConfigEvaluationResult,
+    InflowTuningResult,
+    InflowTuningSettings,
+    TuningError,
+    TuningWindow,
+    elapsed_lag_autocorrelation,
+    evaluate_inflow_config,
+    joint_predictive_nlpd,
+    marginal_predictive_nlpd,
+    normalized_innovation_squared,
+    prior_hourly_increment_to_q,
+    storage_conditional_nlpd,
+    tune_inflow_process_noise,
+)
 from .units import CFS_TO_ACRE_FEET_PER_SECOND, UnitSystem
 
 try:
@@ -70,4 +85,17 @@ __all__ = [
     "predict_state",
     "run_inflow_model",
     "smooth_filter_steps",
+    "InflowConfigEvaluationResult",
+    "InflowTuningResult",
+    "InflowTuningSettings",
+    "TuningError",
+    "TuningWindow",
+    "elapsed_lag_autocorrelation",
+    "evaluate_inflow_config",
+    "joint_predictive_nlpd",
+    "marginal_predictive_nlpd",
+    "normalized_innovation_squared",
+    "prior_hourly_increment_to_q",
+    "storage_conditional_nlpd",
+    "tune_inflow_process_noise",
 ]

@@ -42,3 +42,19 @@ Storage closure remains the stronger internal-consistency check. Its one-step
 residual is predicted storage change minus observed storage change, using the  
 estimate and outflow at the current regular timestamp. The closure table  
 reports RMSE, MAE, bias, paired observations, and coverage.
+
+## Offline process-noise tuning
+
+The package-level `tune_inflow_process_noise` workflow is separate from these
+notebook comparison tables. It uses timezone-aware, non-overlapping operational
+windows and elapsed-time innovation diagnostics. The primary score is causal
+one-step storage NLPD, conditional on simultaneous outflow when available;
+joint NLPD, NIS, bias, physical behavior, and open-loop horizon diagnostics
+are reported separately. This avoids optimizing the filtered storage-closure
+reconstruction.
+
+Keep a contiguous final test period out of tuning. After selection, call
+`evaluate_inflow_config` with the frozen proposed configuration and compare
+test diagnostics against validation using criteria agreed before test
+inspection. Measurement-noise sensitivity scenarios are review diagnostics and
+cannot replace the primary selected result.

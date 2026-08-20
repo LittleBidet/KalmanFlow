@@ -13,3 +13,4 @@ wheels/
 #Additional files
 Reservoirs
 .coverage
+.vscode
