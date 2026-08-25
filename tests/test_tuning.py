@@ -21,7 +21,16 @@ from kalmone import (
     storage_conditional_nlpd,
     tune_inflow_process_noise,
 )
-from kalmone.tuning import _paired_standard_error, _prepare
+from kalmone.kalman import kalman_filter
+from kalmone.tuning import (
+    _batch_kalman_filters,
+    _candidate_values,
+    _diagnostic_plan,
+    _evaluate_candidates_in_batches,
+    _paired_standard_error,
+    _prepare,
+    _window_weights,
+)
 
 
 def _config() -> ReservoirConfig:
@@ -130,6 +139,91 @@ def test_elapsed_autocorrelation_uses_time_not_row_lag() -> None:
         timestamps, [1.0, 2.0, 4.0, 8.0], timedelta(hours=3)
     )
     assert output.loc[output["lag_seconds"] == 3600.0, "pair_count"].iloc[0] == 2
+
+
+def test_regular_elapsed_autocorrelation_matches_fft_pair_counts() -> None:
+    timestamps = pd.date_range("2025-01-01", periods=16, freq="h", tz="UTC")
+    values = np.sin(np.arange(len(timestamps), dtype=float))
+    output = elapsed_lag_autocorrelation(
+        timestamps, values, timedelta(hours=4)
+    )
+    assert output["pair_count"].tolist() == [15, 14, 13, 12]
+    assert output["autocorrelation"].notna().all()
+
+
+def test_batch_candidate_filter_matches_scalar_filter() -> None:
+    storage, discharge = _series()
+    prepared = _prepare(storage, discharge, _config())
+    _, q_values = _candidate_values([2.0, 5.0, 10.0])
+    batched = _batch_kalman_filters(prepared, q_values)
+    for q, result in zip(q_values, batched, strict=True):
+        process = (
+            prepared.q_storage * prepared.storage_basis
+            + q * prepared.inflow_basis
+            + prepared.q_outflow * prepared.outflow_basis
+        )
+        scalar = kalman_filter(
+            prepared.observations,
+            initial_mean=prepared.initial_mean,
+            initial_covariance=prepared.initial_covariance,
+            transition_matrix=prepared.transitions,
+            process_covariance=process,
+            observation_matrix=prepared.model.observation_matrix,
+            observation_covariance=prepared.r,
+        )
+        np.testing.assert_allclose(result.filtered_means, scalar.filtered_means)
+        np.testing.assert_allclose(
+            result.filtered_covariances, scalar.filtered_covariances
+        )
+
+
+def test_first_pass_releases_full_filter_histories() -> None:
+    storage, discharge = _series()
+    prepared = _prepare(storage, discharge, _config())
+    windows = _windows(storage.index)
+    settings = InflowTuningSettings(
+        warmup=timedelta(0), candidate_batch_size=1
+    )
+    prior_values, q_values = _candidate_values([2.0, 5.0, 10.0])
+    plan = _diagnostic_plan(prepared, windows, settings)
+    passes = _evaluate_candidates_in_batches(
+        prepared,
+        prior_values,
+        q_values,
+        windows,
+        settings,
+        _window_weights(windows),
+        plan,
+    )
+    assert all(candidate.filter_result is None for candidate in passes.values())
+    assert all(not candidate.rows for candidate in passes.values())
+    assert all(candidate.diagnostics for candidate in passes.values())
+
+
+def test_tuning_reports_segmented_timing_diagnostics() -> None:
+    storage, discharge = _series()
+    result = tune_inflow_process_noise(
+        storage,
+        discharge,
+        _config(),
+        [2.0, 5.0, 10.0],
+        _windows(storage.index),
+        settings=InflowTuningSettings(warmup=timedelta(0)),
+        proposed_configuration_version="config-v2",
+    )
+    assert {
+        "filtering_seconds",
+        "first_pass_scoring_seconds",
+        "post_selection_scoring_seconds",
+        "scoring_seconds",
+        "horizons_seconds",
+        "sensitivity_seconds",
+        "total_seconds",
+    } <= set(result.timing_seconds)
+    assert all(value >= 0.0 for value in result.timing_seconds.values())
+    assert result.timing_seconds["scoring_seconds"] >= result.timing_seconds[
+        "first_pass_scoring_seconds"
+    ]
 
 
 def test_initialization_excludes_exactly_two_rows() -> None:

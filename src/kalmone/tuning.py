@@ -11,17 +11,18 @@ operational stream.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hashlib import blake2b
 from math import log, sqrt
+from time import perf_counter
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from .kalman import KalmanFilterResult, kalman_filter, predict_state
+from .kalman import KalmanFilterResult, kalman_filter
 from .models import ReservoirStateSpaceModel
 from .reservoir_config import ReservoirConfig
 
@@ -91,6 +92,8 @@ class InflowTuningSettings:
     max_jitter_fraction: float = 1e-9
     max_regularized_steps: int = 0
     r_sensitivity_multipliers: tuple[float, ...] = ()
+    full_grid_sensitivity: bool = False
+    candidate_batch_size: int = 32
     nis_warning_range: tuple[float, float] | None = (0.7, 1.5)
     innovation_bias_warning: float | None = 0.25
 
@@ -121,6 +124,8 @@ class InflowTuningSettings:
             raise ValueError("bootstrap_samples must be positive")
         if int(self.max_regularized_steps) < 0:
             raise ValueError("max_regularized_steps must be nonnegative")
+        if int(self.candidate_batch_size) < 1:
+            raise ValueError("candidate_batch_size must be positive")
         jitter = float(self.max_jitter_fraction)
         if not np.isfinite(jitter) or jitter < 0.0:
             raise ValueError("max_jitter_fraction must be nonnegative")
@@ -159,6 +164,10 @@ class InflowTuningSettings:
             self, "max_regularized_steps", int(self.max_regularized_steps)
         )
         object.__setattr__(self, "r_sensitivity_multipliers", multipliers)
+        object.__setattr__(
+            self, "full_grid_sensitivity", bool(self.full_grid_sensitivity)
+        )
+        object.__setattr__(self, "candidate_batch_size", int(self.candidate_batch_size))
 
 
 @dataclass(frozen=True)
@@ -177,6 +186,7 @@ class InflowTuningResult:
     selection_threshold: float
     selection_reason: str
     warnings: tuple[str, ...] = ()
+    timing_seconds: Mapping[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in (
@@ -201,6 +211,11 @@ class InflowTuningResult:
             tuple(float(v) for v in self.competitive_candidates),
         )
         object.__setattr__(self, "warnings", tuple(str(v) for v in self.warnings))
+        object.__setattr__(
+            self,
+            "timing_seconds",
+            {str(key): float(value) for key, value in self.timing_seconds.items()},
+        )
 
 
 @dataclass(frozen=True)
@@ -245,6 +260,18 @@ class _Prepared:
     q_outflow: float
     r: np.ndarray
     model: ReservoirStateSpaceModel
+    timestamp_seconds: np.ndarray
+    finite_observations: np.ndarray
+
+
+@dataclass(frozen=True)
+class _DiagnosticPlan:
+    """Static masks and target rows shared by every candidate pass."""
+
+    window_masks: tuple[np.ndarray, ...]
+    score_mask: np.ndarray
+    horizon_targets: dict[tuple[int, int], np.ndarray]
+    horizon_tolerance_seconds: float
 
 
 @dataclass
@@ -258,6 +285,9 @@ class _Pass:
     regularization_count: int
     max_jitter: float
     reasons: list[str] = field(default_factory=list)
+    # Compact NumPy diagnostics are retained for all candidates.  Python row
+    # dictionaries are materialized only for the selected/competitive rerun.
+    diagnostics: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 def prior_hourly_increment_to_q(prior_hourly_increment_sd: float) -> float:
@@ -362,43 +392,120 @@ def elapsed_lag_autocorrelation(
     finite = np.isfinite(series)
     if finite.sum() < 2:
         return pd.DataFrame(columns=["lag_seconds", "autocorrelation", "pair_count"])
-    seconds = np.asarray([timestamp.value / 1e9 for timestamp in index], dtype=float)
-    cadence = float(np.median(np.diff(seconds))) if len(index) > 1 else limit
+    seconds = _timestamp_seconds(index)
+    # Use the finest observed interval as the lag-bin spacing.  This preserves
+    # short real lags on sparse/irregular telemetry while still bounding the
+    # number of bins by ``max_lag``.
+    cadence = float(np.min(np.diff(seconds))) if len(index) > 1 else limit
     tolerance = float(
         (lag_tolerance or timedelta(seconds=max(cadence * 0.25, 1.0))).total_seconds()
     )
     targets = np.arange(cadence, limit + cadence * 0.5, cadence)
-    rows: list[dict[str, float | int]] = []
     finite_values = series[finite]
     centre = float(np.mean(finite_values))
     variance = float(np.sum((finite_values - centre) ** 2))
     if variance <= 0.0:
         variance = np.nan
+
+    # A regular, complete grid is common for telemetry.  FFT convolution makes
+    # its complete autocorrelation O(n log n), rather than repeating a search
+    # over every timestamp for every lag.
+    # Compare integer timestamp ticks so large epoch values do not lose enough
+    # floating-point precision to bypass the regular-grid fast path.
+    tick_differences = np.diff(index.asi8)
+    cadence_is_regular = len(seconds) > 2 and np.all(
+        tick_differences == tick_differences[0]
+    )
+    if cadence_is_regular and finite.all():
+        centred = series - centre
+        size = 1 << (2 * len(centred) - 1).bit_length()
+        spectrum = np.fft.rfft(centred, size)
+        convolution = np.fft.irfft(spectrum * np.conjugate(spectrum), size)
+        lag_rows: list[dict[str, float | int]] = []
+        for target in targets:
+            lower_step = max(
+                1, int(np.ceil((float(target) - tolerance) / cadence - 1e-12))
+            )
+            upper_step = min(
+                len(centred) - 1,
+                int(np.floor((float(target) + tolerance) / cadence + 1e-12)),
+            )
+            steps = np.arange(lower_step, upper_step + 1, dtype=int)
+            pair_count = int(np.sum(len(centred) - steps)) if len(steps) else 0
+            covariance = (
+                float(np.sum(convolution[steps])) if len(steps) else np.nan
+            )
+            lag_rows.append(
+                {
+                    "lag_seconds": float(target),
+                    "autocorrelation": (
+                        covariance / variance
+                        if pair_count and np.isfinite(variance)
+                        else np.nan
+                    ),
+                    "pair_count": pair_count,
+                }
+            )
+        return pd.DataFrame(lag_rows)
+
+    # Irregular observations use vectorized pair construction.  Search bounds
+    # are computed once per lag over the finite timestamp vector; no inner loop
+    # walks timestamps.  This also gives an explicit bounded-lag memory cost.
+    finite_seconds = seconds[finite]
+    centered = finite_values - centre
+    rows: list[dict[str, float | int]] = []
     for target in targets:
+        lower = np.searchsorted(
+            finite_seconds, finite_seconds + target - tolerance, side="left"
+        )
+        upper = np.searchsorted(
+            finite_seconds, finite_seconds + target + tolerance, side="right"
+        )
+        counts = np.maximum(upper - lower, 0)
+        total = int(counts.sum())
         pair_count = 0
         covariance = 0.0
-        for i, current in enumerate(seconds):
-            if not finite[i]:
-                continue
-            lower = int(np.searchsorted(seconds, current + target - tolerance))
-            upper = int(
-                np.searchsorted(seconds, current + target + tolerance, side="right")
-            )
-            matching = np.flatnonzero(finite[lower:upper]) + lower
-            matching = matching[matching > i]
-            if len(matching):
-                pair_count += len(matching)
-                covariance += float(
-                    np.sum((series[i] - centre) * (series[matching] - centre))
-                )
-        if pair_count and np.isfinite(variance):
-            correlation = covariance / variance if variance > 0 else np.nan
-        else:
-            correlation = np.nan
+        if total:
+            # Keep a pathological irregular near-grid from materializing all
+            # pairs at once. The common case remains one vectorized operation;
+            # large cases use bounded source chunks with the same arithmetic.
+            chunk_size = 2_000_000
+            if total <= chunk_size:
+                starts = np.cumsum(counts) - counts
+                source = np.repeat(np.arange(len(finite_seconds)), counts)
+                local = np.arange(total) - np.repeat(starts, counts)
+                matching = np.repeat(lower, counts) + local
+                valid = matching > source
+                source = source[valid]
+                matching = matching[valid]
+                pair_count = int(len(source))
+                covariance = float(np.dot(centered[source], centered[matching]))
+            else:
+                for begin in range(0, len(finite_seconds), 4096):
+                    end = min(begin + 4096, len(finite_seconds))
+                    chunk_counts = counts[begin:end]
+                    chunk_total = int(chunk_counts.sum())
+                    if not chunk_total:
+                        continue
+                    starts = np.cumsum(chunk_counts) - chunk_counts
+                    source = np.repeat(np.arange(begin, end), chunk_counts)
+                    local = np.arange(chunk_total) - np.repeat(starts, chunk_counts)
+                    matching = np.repeat(lower[begin:end], chunk_counts) + local
+                    valid = matching > source
+                    source = source[valid]
+                    matching = matching[valid]
+                    pair_count += int(len(source))
+                    covariance += float(
+                        np.dot(centered[source], centered[matching])
+                    )
         rows.append(
             {
                 "lag_seconds": float(target),
-                "autocorrelation": float(correlation),
+                "autocorrelation": (
+                    covariance / variance
+                    if pair_count and np.isfinite(variance)
+                    else np.nan
+                ),
                 "pair_count": pair_count,
             }
         )
@@ -433,17 +540,22 @@ def tune_inflow_process_noise(
     prepared = _prepare(storage, discharge, base_config)
     prior_values, q_values = _candidate_values(candidate_prior_hourly_increment_sd)
     weights = _window_weights(windows)
-    passes = {
-        q: _evaluate_candidate(
-            prepared,
-            prior_sd=prior,
-            q_inflow=q,
-            windows=windows,
-            settings=options,
-            window_weights=weights,
-        )
-        for prior, q in zip(prior_values, q_values, strict=True)
-    }
+    timings: dict[str, float] = {}
+    total_started = perf_counter()
+    plan = _diagnostic_plan(prepared, windows, options)
+    passes = _evaluate_candidates_in_batches(
+        prepared,
+        prior_values,
+        q_values,
+        windows,
+        options,
+        weights,
+        plan,
+        timings,
+    )
+    first_pass_scoring_seconds = timings.get("scoring_seconds", 0.0)
+    timings["first_pass_scoring_seconds"] = first_pass_scoring_seconds
+    scoring_started = perf_counter()
     candidate_frame, window_frame, _, eligible_q, warnings = _summary_frames(
         passes, windows, weights, options
     )
@@ -483,6 +595,26 @@ def tune_inflow_process_noise(
     )
     if not competitive_q:
         competitive_q = (best_q,)
+    # Detailed rows/covariances are only needed for candidates that can affect
+    # the audited result.  Compact NumPy diagnostics remain available for the
+    # complete grid and continue to populate candidate_summary.
+    for q in competitive_q:
+        prior = float(prior_values[q_values.index(q)])
+        passes[q] = _evaluate_candidate(
+            prepared,
+            prior_sd=prior,
+            q_inflow=q,
+            windows=windows,
+            settings=options,
+            window_weights=weights,
+            plan=plan,
+            retain_rows=True,
+        )
+    post_selection_scoring_seconds = perf_counter() - scoring_started
+    timings["post_selection_scoring_seconds"] = post_selection_scoring_seconds
+    timings["scoring_seconds"] = (
+        first_pass_scoring_seconds + post_selection_scoring_seconds
+    )
     selected_q = min(competitive_q)
     selected_prior = float(prior_values[q_values.index(selected_q)])
     selected_pass = passes[selected_q]
@@ -511,12 +643,25 @@ def tune_inflow_process_noise(
         candidate_frame["selected"], "smallest competitive candidate", ""
     )
     candidate_frame = _sort_summary(candidate_frame, selected_q, competitive_q)
+    horizon_started = perf_counter()
     selected_horizons = _horizon_frame(
-        prepared, passes, competitive_q, windows, options, selected_q
+        prepared, passes, competitive_q, windows, options, selected_q, plan=plan
     )
+    timings["horizons_seconds"] = perf_counter() - horizon_started
+    sensitivity_started = perf_counter()
     r_sensitivity = _r_sensitivity(
-        prepared, q_values, prior_values, windows, options, base_config, selected_q
+        prepared,
+        q_values,
+        prior_values,
+        windows,
+        options,
+        base_config,
+        selected_q,
+        competitive_q=competitive_q,
+        plan=plan,
     )
+    timings["sensitivity_seconds"] = perf_counter() - sensitivity_started
+    timings["total_seconds"] = perf_counter() - total_started
     selected_config = _proposed_config(
         base_config,
         selected_q,
@@ -591,6 +736,7 @@ def tune_inflow_process_noise(
         selection_threshold=selection_threshold,
         selection_reason=selection_reason,
         warnings=tuple(dict.fromkeys(warnings)),
+        timing_seconds=timings,
     )
 
 
@@ -620,6 +766,7 @@ def evaluate_inflow_config(
     windows = _validate_windows((evaluation_window,))
     prior = sqrt(float(config.q[1, 1]) * 3600.0)
     weights = (1.0,)
+    plan = _diagnostic_plan(prepared, windows, options)
     candidate = _evaluate_candidate(
         prepared,
         prior_sd=prior,
@@ -627,6 +774,8 @@ def evaluate_inflow_config(
         windows=windows,
         settings=options,
         window_weights=weights,
+        plan=plan,
+        retain_rows=True,
     )
     passes = {candidate.q_inflow: candidate}
     candidate_frame, window_frame, _, _, warnings = _summary_frames(
@@ -634,7 +783,13 @@ def evaluate_inflow_config(
     )
     regime_frame = _regime_frame(window_frame)
     horizon_frame = _horizon_frame(
-        prepared, passes, (candidate.q_inflow,), windows, options, candidate.q_inflow
+        prepared,
+        passes,
+        (candidate.q_inflow,),
+        windows,
+        options,
+        candidate.q_inflow,
+        plan=plan,
     )
     return InflowConfigEvaluationResult(
         config,
@@ -668,6 +823,27 @@ def _validate_index(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
             "timestamps must be timezone-aware, strictly increasing, and nonmissing"
         )
     return index
+
+
+def _timestamp_seconds(index: pd.DatetimeIndex) -> np.ndarray:
+    """Convert timestamps to epoch seconds independent of pandas resolution."""
+
+    values = np.asarray(index.tz_convert("UTC").tz_localize(None))
+    unit, multiplier = np.datetime_data(values.dtype)
+    seconds_per_unit = {
+        "s": 1.0,
+        "ms": 1e-3,
+        "us": 1e-6,
+        "ns": 1e-9,
+        "m": 60.0,
+        "h": 3600.0,
+        "D": 86400.0,
+    }
+    try:
+        scale = seconds_per_unit[unit]
+    except KeyError as error:
+        raise ValueError(f"unsupported timestamp resolution: {unit}") from error
+    return values.astype(np.int64) * (float(multiplier) * scale)
 
 
 def _validate_windows(windows: Sequence[TuningWindow]) -> tuple[TuningWindow, ...]:
@@ -784,6 +960,61 @@ def _prepare(
         float(q[2, 2]),
         r.copy(),
         model,
+        _timestamp_seconds(index[positions]),
+        np.isfinite(observations),
+    )
+
+
+def _diagnostic_plan(
+    prepared: _Prepared,
+    windows: Sequence[TuningWindow],
+    settings: InflowTuningSettings,
+) -> _DiagnosticPlan:
+    """Build all candidate-independent masks and horizon target indexes."""
+
+    timestamps = prepared.timestamps
+    window_masks = tuple(window.mask(timestamps) for window in windows)
+    score_mask = np.arange(len(timestamps), dtype=int) >= 2
+    score_mask &= timestamps >= timestamps[1] + pd.Timedelta(
+        seconds=settings.warmup.total_seconds()
+    )
+    cadence = float(np.median(prepared.elapsed_seconds))
+    tolerance_seconds = (
+        cadence / 2.0
+        if settings.horizon_tolerance is None
+        else settings.horizon_tolerance.total_seconds()
+    )
+    targets: dict[tuple[int, int], np.ndarray] = {}
+    seconds = prepared.timestamp_seconds
+    for window_index, mask in enumerate(window_masks):
+        origin_mask = mask & score_mask
+        origins = np.flatnonzero(origin_mask)
+        for horizon_index, horizon in enumerate(settings.forecast_horizons):
+            target_seconds = seconds[origins] + horizon.total_seconds()
+            target_rows = np.searchsorted(seconds, target_seconds, side="left")
+            valid = target_rows < len(seconds)
+            distances = np.full(len(origins), np.inf, dtype=float)
+            valid_positions = np.flatnonzero(valid)
+            if len(valid_positions):
+                distances[valid_positions] = (
+                    seconds[target_rows[valid_positions]]
+                    - target_seconds[valid_positions]
+                )
+            valid &= distances <= tolerance_seconds
+            valid &= target_rows > origins
+            if len(valid_positions):
+                valid_rows = target_rows[valid_positions]
+                valid[valid_positions] &= mask[valid_rows]
+                valid[valid_positions] &= score_mask[valid_rows]
+                valid[valid_positions] &= prepared.finite_observations[valid_rows, 0]
+            target_array = np.full(len(seconds), -1, dtype=int)
+            target_array[origins[valid]] = target_rows[valid]
+            targets[(window_index, horizon_index)] = target_array
+    return _DiagnosticPlan(
+        window_masks=window_masks,
+        score_mask=score_mask,
+        horizon_targets=targets,
+        horizon_tolerance_seconds=tolerance_seconds,
     )
 
 
@@ -814,6 +1045,231 @@ def _process_covariance_bases(
     return storage, inflow, outflow
 
 
+def _batch_kalman_filters(
+    prepared: _Prepared, q_values: Sequence[float]
+) -> list[KalmanFilterResult]:
+    """Run independent candidate filters with a vectorized candidate axis.
+
+    The time axis remains sequential (as required by a Kalman filter), while
+    the candidate axis is handled in NumPy.  If a batch solve is singular, the
+    scalar implementation is used for that complete batch so its established
+    error behavior is preserved.
+    """
+
+    values = np.asarray(q_values, dtype=float)
+    candidate_count = len(values)
+    if candidate_count == 0:
+        return []
+    observations = prepared.observations
+    n_times, n_obs = observations.shape
+    n_state = prepared.initial_mean.shape[0]
+    process = (
+        prepared.q_storage * prepared.storage_basis[None, :, :, :]
+        + values[:, None, None, None] * prepared.inflow_basis[None, :, :, :]
+        + prepared.q_outflow * prepared.outflow_basis[None, :, :, :]
+    )
+    transitions = prepared.transitions
+    filtered_means = np.empty((candidate_count, n_times, n_state), dtype=float)
+    filtered_covariances = np.empty(
+        (candidate_count, n_times, n_state, n_state), dtype=float
+    )
+    predicted_means = np.empty_like(filtered_means)
+    predicted_covariances = np.empty_like(filtered_covariances)
+    innovations = np.full((candidate_count, n_times, n_obs), np.nan, dtype=float)
+    innovation_covariances = np.full(
+        (candidate_count, n_times, n_obs, n_obs), np.nan, dtype=float
+    )
+    update_mask = np.zeros((candidate_count, n_times), dtype=bool)
+    log_likelihood = np.zeros(candidate_count, dtype=float)
+    predicted_means[:, 0] = prepared.initial_mean
+    predicted_covariances[:, 0] = prepared.initial_covariance
+    eye = np.eye(n_state)
+    h = np.asarray(prepared.model.observation_matrix, dtype=float)
+    r = prepared.r
+    try:
+        for k in range(n_times):
+            if k:
+                transition = transitions[k - 1]
+                predicted_means[:, k] = np.einsum(
+                    "ij,cj->ci", transition, filtered_means[:, k - 1]
+                )
+                predicted_covariances[:, k] = (
+                    np.einsum(
+                        "ij,cjk,lk->cil",
+                        transition,
+                        filtered_covariances[:, k - 1],
+                        transition,
+                    )
+                    + process[:, k - 1]
+                )
+                predicted_covariances[:, k] = (
+                    predicted_covariances[:, k]
+                    + np.swapaxes(predicted_covariances[:, k], 1, 2)
+                ) / 2.0
+            mask = np.isfinite(observations[k])
+            if not np.any(mask):
+                filtered_means[:, k] = predicted_means[:, k]
+                filtered_covariances[:, k] = predicted_covariances[:, k]
+                continue
+            h_obs = h[mask]
+            r_obs = r[np.ix_(mask, mask)]
+            innovation = observations[k, mask][None, :] - np.einsum(
+                "ij,cj->ci", h_obs, predicted_means[:, k]
+            )
+            covariance = np.einsum(
+                "ij,cjk,lk->cil",
+                h_obs,
+                predicted_covariances[:, k],
+                h_obs,
+            ) + r_obs
+            covariance = (covariance + np.swapaxes(covariance, 1, 2)) / 2.0
+            ph_t = np.einsum(
+                "cij,lj->cli", predicted_covariances[:, k], h_obs
+            )
+            # K = P H' S^-1; solve S X = (P H')' for all candidates.
+            gain = np.linalg.solve(covariance, np.swapaxes(ph_t, 1, 2))
+            gain = np.swapaxes(gain, 1, 2)
+            filtered_means[:, k] = predicted_means[:, k] + np.einsum(
+                "cij,cj->ci", gain, innovation
+            )
+            update_matrix = eye[None, :, :] - np.einsum(
+                "cij,jk->cik", gain, h_obs
+            )
+            filtered_covariances[:, k] = np.einsum(
+                "cij,cjk,clk->cil",
+                update_matrix,
+                predicted_covariances[:, k],
+                update_matrix,
+            ) + np.einsum("cij,jk,clk->cil", gain, r_obs, gain)
+            filtered_covariances[:, k] = (
+                filtered_covariances[:, k]
+                + np.swapaxes(filtered_covariances[:, k], 1, 2)
+            ) / 2.0
+            innovations[:, k, mask] = innovation
+            # Explicitly scatter the observed block because np.ix_ does not
+            # broadcast cleanly over a leading candidate axis.
+            observed_indices = np.flatnonzero(mask)
+            for row_index, observed_index in enumerate(observed_indices):
+                for column_index, column_observed in enumerate(observed_indices):
+                    innovation_covariances[:, k, observed_index, column_observed] = (
+                        covariance[:, row_index, column_index]
+                    )
+            update_mask[:, k] = True
+            sign, logdet = np.linalg.slogdet(covariance)
+            solved = np.linalg.solve(covariance, innovation[..., None])[..., 0]
+            log_likelihood += np.where(
+                sign > 0,
+                -0.5
+                * (
+                    len(observed_indices) * np.log(2.0 * np.pi)
+                    + logdet
+                    + np.sum(innovation * solved, axis=1)
+                ),
+                np.nan,
+            )
+    except (np.linalg.LinAlgError, ValueError, FloatingPointError):
+        from .kalman import kalman_filter
+
+        return [
+            kalman_filter(
+                observations,
+                initial_mean=prepared.initial_mean,
+                initial_covariance=prepared.initial_covariance,
+                transition_matrix=transitions,
+                process_covariance=process[index],
+                observation_matrix=prepared.model.observation_matrix,
+                observation_covariance=prepared.r,
+            )
+            for index in range(candidate_count)
+        ]
+    return [
+        KalmanFilterResult(
+            filtered_means=filtered_means[index],
+            filtered_covariances=filtered_covariances[index],
+            predicted_means=predicted_means[index],
+            predicted_covariances=predicted_covariances[index],
+            innovations=innovations[index],
+            innovation_covariances=innovation_covariances[index],
+            update_mask=update_mask[index],
+            transition_matrices=transitions.copy(),
+            log_likelihood=float(log_likelihood[index]),
+        )
+        for index in range(candidate_count)
+    ]
+
+
+def _batch_kalman_filter_chunks(
+    prepared: _Prepared,
+    q_values: Sequence[float],
+    *,
+    chunk_size: int,
+    timing_seconds: dict[str, float] | None = None,
+) -> Iterator[tuple[int, list[KalmanFilterResult]]]:
+    """Yield bounded candidate filter batches.
+
+    Each yielded list owns a full history only for one bounded candidate
+    chunk. Callers must consume/score it before requesting the next chunk.
+    """
+
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive")
+    values = tuple(float(value) for value in q_values)
+    filtering_seconds = 0.0
+    for start in range(0, len(values), chunk_size):
+        stop = min(start + chunk_size, len(values))
+        batch_started = perf_counter()
+        batch_results = _batch_kalman_filters(prepared, values[start:stop])
+        filtering_seconds += perf_counter() - batch_started
+        if timing_seconds is not None:
+            timing_seconds["filtering_seconds"] = filtering_seconds
+        yield start, batch_results
+
+
+def _evaluate_candidates_in_batches(
+    prepared: _Prepared,
+    prior_values: Sequence[float],
+    q_values: Sequence[float],
+    windows: Sequence[TuningWindow],
+    settings: InflowTuningSettings,
+    window_weights: Array,
+    plan: _DiagnosticPlan,
+    timing_seconds: dict[str, float] | None = None,
+) -> dict[float, _Pass]:
+    """Score the complete grid while retaining only compact candidate state."""
+
+    passes: dict[float, _Pass] = {}
+    scoring_seconds = 0.0
+    for start, batch_results in _batch_kalman_filter_chunks(
+        prepared,
+        q_values,
+        chunk_size=settings.candidate_batch_size,
+        timing_seconds=timing_seconds,
+    ):
+        for offset, result in enumerate(batch_results):
+            index = start + offset
+            q = float(q_values[index])
+            score_started = perf_counter()
+            candidate = _evaluate_candidate(
+                prepared,
+                prior_sd=float(prior_values[index]),
+                q_inflow=q,
+                windows=windows,
+                settings=settings,
+                window_weights=window_weights,
+                plan=plan,
+                filter_result_override=result,
+            )
+            scoring_seconds += perf_counter() - score_started
+            # The first pass needs only NumPy diagnostics and aggregates. The
+            # chunk's full state/covariance history is released before the next
+            # chunk is materialized.
+            candidate.filter_result = None
+            passes[q] = candidate
+    if timing_seconds is not None:
+        timing_seconds["scoring_seconds"] = scoring_seconds
+    return passes
+
+
 def _evaluate_candidate(
     prepared: _Prepared,
     *,
@@ -823,6 +1279,9 @@ def _evaluate_candidate(
     settings: InflowTuningSettings,
     window_weights: Array,
     r_override: Array | None = None,
+    plan: _DiagnosticPlan | None = None,
+    retain_rows: bool = False,
+    filter_result_override: KalmanFilterResult | None = None,
 ) -> _Pass:
     q_discrete = (
         prepared.q_storage * prepared.storage_basis
@@ -830,65 +1289,69 @@ def _evaluate_candidate(
         + prepared.q_outflow * prepared.outflow_basis
     )
     r = prepared.r if r_override is None else np.asarray(r_override, dtype=float)
-    result: KalmanFilterResult | None = None
+    result: KalmanFilterResult | None = filter_result_override
     reasons: list[str] = []
-    try:
-        result = kalman_filter(
-            prepared.observations,
-            initial_mean=prepared.initial_mean,
-            initial_covariance=prepared.initial_covariance,
-            transition_matrix=prepared.transitions,
-            process_covariance=q_discrete,
-            observation_matrix=prepared.model.observation_matrix,
-            observation_covariance=r,
-        )
-    except (ValueError, np.linalg.LinAlgError, FloatingPointError) as error:
-        reasons.append(f"filter failed: {error}")
-        return _Pass(
-            q_inflow,
-            prior_sd,
-            None,
-            [],
-            {w.name: {"storage_nlpd": np.nan, "storage_count": 0} for w in windows},
-            {},
-            0,
-            0.0,
-            reasons,
-        )
+    if result is None:
+        try:
+            result = kalman_filter(
+                prepared.observations,
+                initial_mean=prepared.initial_mean,
+                initial_covariance=prepared.initial_covariance,
+                transition_matrix=prepared.transitions,
+                process_covariance=q_discrete,
+                observation_matrix=prepared.model.observation_matrix,
+                observation_covariance=r,
+            )
+        except (ValueError, np.linalg.LinAlgError, FloatingPointError) as error:
+            reasons.append(f"filter failed: {error}")
+            return _Pass(
+                q_inflow,
+                prior_sd,
+                None,
+                [],
+                {w.name: {"storage_nlpd": np.nan, "storage_count": 0} for w in windows},
+                {},
+                0,
+                0.0,
+                reasons,
+            )
     if not (
         np.isfinite(result.filtered_means).all()
         and np.isfinite(result.predicted_means).all()
         and np.isfinite(result.predicted_covariances).all()
     ):
         reasons.append("nonfinite filtered or predicted state")
-    rows: list[dict[str, Any]] = []
+    if plan is None:
+        plan = _diagnostic_plan(prepared, windows, settings)
+    count = len(prepared.timestamps)
+    diagnostics = {
+        key: np.full(count, np.nan, dtype=float)
+        for key in (
+            "storage_innovation",
+            "primary_nlpd",
+            "joint_nlpd",
+            "joint_nis",
+            "storage_nis",
+            "outflow_nis",
+            "conditional_storage_nis",
+            "storage_z",
+            "outflow_z",
+            "conditional_storage_z",
+            "jitter",
+        )
+    }
+    diagnostics["joint_components"] = prepared.finite_observations.sum(axis=1).astype(
+        float
+    )
+    diagnostics["score"] = plan.score_mask.astype(float)
     regularization_count = 0
     max_jitter = 0.0
-    warmup_end = prepared.timestamps[1] + pd.Timedelta(
-        seconds=settings.warmup.total_seconds()
-    )
     for row, timestamp in enumerate(prepared.timestamps):
-        finite = np.isfinite(prepared.observations[row])
-        record: dict[str, Any] = {
-            "row": row,
-            "timestamp": timestamp,
-            "storage_innovation": np.nan,
-            "primary_nlpd": np.nan,
-            "joint_nlpd": np.nan,
-            "joint_nis": np.nan,
-            "joint_components": int(finite.sum()),
-            "storage_nis": np.nan,
-            "outflow_nis": np.nan,
-            "conditional_storage_nis": np.nan,
-            "storage_z": np.nan,
-            "outflow_z": np.nan,
-            "conditional_storage_z": np.nan,
-            "jitter": 0.0,
-        }
+        finite = prepared.finite_observations[row]
         innovation = result.innovations[row]
         covariance = result.innovation_covariances[row]
         if finite[0] and np.isfinite(innovation[0]):
-            record["storage_innovation"] = innovation[0]
+            diagnostics["storage_innovation"][row] = innovation[0]
         if finite.any():
             observed = np.flatnonzero(finite)
             vector = innovation[observed]
@@ -902,9 +1365,9 @@ def _evaluate_candidate(
                     f"{timestamp.isoformat()}"
                 )
             else:
-                record["joint_nlpd"] = joint
-                record["joint_nis"] = quad
-                record["jitter"] = jitter
+                diagnostics["joint_nlpd"][row] = joint
+                diagnostics["joint_nis"][row] = quad
+                diagnostics["jitter"][row] = jitter
                 regularization_count += int(jitter > 0.0)
                 max_jitter = max(max_jitter, jitter)
             for component, key in ((0, "storage"), (1, "outflow")):
@@ -912,8 +1375,8 @@ def _evaluate_candidate(
                     variance = covariance[component, component]
                     if np.isfinite(variance) and variance > 0.0:
                         z = innovation[component] / sqrt(variance)
-                        record[f"{key}_z"] = z
-                        record[f"{key}_nis"] = z * z
+                        diagnostics[f"{key}_z"][row] = z
+                        diagnostics[f"{key}_nis"][row] = z * z
             if finite[0]:
                 if finite[1]:
                     try:
@@ -925,57 +1388,42 @@ def _evaluate_candidate(
                         )
                         soo = covariance[1, 1]
                         conditional_variance = (
-                            covariance[0, 0] - covariance[0, 1] * covariance[1, 0] / soo
+                            covariance[0, 0]
+                            - covariance[0, 1] * covariance[1, 0] / soo
                         )
                         conditional_innovation = (
                             innovation[0] - covariance[0, 1] * innovation[1] / soo
                         )
-                        record["conditional_storage_z"] = conditional_innovation / sqrt(
+                        z = conditional_innovation / sqrt(
                             max(conditional_variance, np.finfo(float).tiny)
                         )
-                        record["conditional_storage_nis"] = (
-                            record["conditional_storage_z"] ** 2
-                        )
+                        diagnostics["conditional_storage_z"][row] = z
+                        diagnostics["conditional_storage_nis"][row] = z * z
                     except ValueError as error:
                         reasons.append(str(error))
                         conditional = np.nan
-                    record["primary_nlpd"] = conditional
+                    diagnostics["primary_nlpd"][row] = conditional
                 else:
                     try:
-                        record["primary_nlpd"] = marginal_predictive_nlpd(
+                        diagnostics["primary_nlpd"][row] = marginal_predictive_nlpd(
                             innovation[0],
                             covariance[0, 0],
                             max_jitter_fraction=settings.max_jitter_fraction,
                         )
                     except ValueError as error:
                         reasons.append(str(error))
-        # ``score`` marks an eligible post-initialization timestamp.  The
-        # primary storage score may still be missing when storage is missing;
-        # joint and outflow diagnostics remain valid for that row.
-        record["score"] = row >= 2 and timestamp >= warmup_end
-        rows.append(record)
     window_rows: dict[str, dict[str, Any]] = {}
-    for window in windows:
-        eligible = [
-            row
-            for row in rows
-            if window.start <= row["timestamp"] < window.end and row["score"]
-        ]
-        selected = [row for row in eligible if np.isfinite(row["primary_nlpd"])]
-        primary = np.asarray([row["primary_nlpd"] for row in selected], dtype=float)
-        joint = [row for row in eligible if np.isfinite(row["joint_nlpd"])]
-        window_rows[window.name] = _aggregate_rows(
-            primary, joint, selected, eligible, window
+    for window, window_mask in zip(windows, plan.window_masks, strict=True):
+        window_rows[window.name] = _aggregate_arrays(
+            diagnostics, window_mask, window, plan.score_mask
         )
-    validation_rows = [
-        row
-        for row in rows
-        if row["score"]
-        and any(window.start <= row["timestamp"] < window.end for window in windows)
-    ]
-    physical = _physical_metrics(result, validation_rows, settings)
+    validation_mask = plan.score_mask & np.logical_or.reduce(plan.window_masks)
+    physical = _physical_metrics_arrays(
+        result, diagnostics, prepared.timestamps, validation_mask, settings
+    )
     if regularization_count > settings.max_regularized_steps:
         reasons.append("excessive covariance regularization")
+    rows = _records_from_arrays(prepared.timestamps, diagnostics) if retain_rows else []
     return _Pass(
         q_inflow,
         prior_sd,
@@ -986,6 +1434,7 @@ def _evaluate_candidate(
         regularization_count,
         max_jitter,
         list(dict.fromkeys(reasons)),
+        diagnostics,
     )
 
 
@@ -1066,6 +1515,193 @@ def _aggregate_rows(
         "conditional_storage_bias": mean_metric("conditional_storage_z"),
         "coverage": float(len(primary) / max(1, len(eligible))),
         "regularization_count": int(sum(row["jitter"] > 0 for row in selected)),
+    }
+
+
+def _aggregate_arrays(
+    diagnostics: Mapping[str, np.ndarray],
+    window_mask: np.ndarray,
+    window: TuningWindow,
+    score_mask: np.ndarray,
+) -> dict[str, Any]:
+    """Aggregate one window from compact arrays without row dictionaries."""
+
+    eligible_mask = window_mask & score_mask
+    primary_mask = eligible_mask & np.isfinite(diagnostics["primary_nlpd"])
+    joint_mask = eligible_mask & np.isfinite(diagnostics["joint_nlpd"])
+
+    def mean_metric(key: str) -> float:
+        values = diagnostics[key][primary_mask]
+        return float(np.mean(values)) if len(values) else np.nan
+
+    joint_components = diagnostics["joint_components"][joint_mask]
+    joint_count = int(np.sum(joint_components))
+    return {
+        "window": window.name,
+        "regime": window.regime,
+        "start": window.start,
+        "end": window.end,
+        "storage_nlpd": float(np.mean(diagnostics["primary_nlpd"][primary_mask]))
+        if np.any(primary_mask)
+        else np.nan,
+        "storage_count": int(np.sum(primary_mask)),
+        "joint_nlpd": (
+            float(
+                np.sum(
+                    diagnostics["joint_nlpd"][joint_mask] * joint_components
+                )
+                / joint_count
+            )
+            if joint_count
+            else np.nan
+        ),
+        "joint_count": joint_count,
+        "joint_nis": (
+            float(np.sum(diagnostics["joint_nis"][joint_mask]) / joint_count)
+            if joint_count
+            else np.nan
+        ),
+        "storage_nis": mean_metric("storage_nis"),
+        "outflow_nis": mean_metric("outflow_nis"),
+        "conditional_storage_nis": mean_metric("conditional_storage_nis"),
+        "storage_bias": mean_metric("storage_z"),
+        "outflow_bias": mean_metric("outflow_z"),
+        "conditional_storage_bias": mean_metric("conditional_storage_z"),
+        "coverage": float(np.sum(primary_mask) / max(1, np.sum(eligible_mask))),
+        "regularization_count": int(
+            np.sum(diagnostics["jitter"][primary_mask] > 0)
+        ),
+    }
+
+
+def _records_from_arrays(
+    timestamps: pd.DatetimeIndex, diagnostics: Mapping[str, np.ndarray]
+) -> list[dict[str, Any]]:
+    """Materialize the legacy row representation for detailed candidates."""
+
+    keys = (
+        "storage_innovation",
+        "primary_nlpd",
+        "joint_nlpd",
+        "joint_nis",
+        "joint_components",
+        "storage_nis",
+        "outflow_nis",
+        "conditional_storage_nis",
+        "storage_z",
+        "outflow_z",
+        "conditional_storage_z",
+        "jitter",
+        "score",
+    )
+    rows: list[dict[str, Any]] = []
+    for row, timestamp in enumerate(timestamps):
+        record = {key: float(diagnostics[key][row]) for key in keys}
+        record["row"] = row
+        record["timestamp"] = timestamp
+        record["joint_components"] = int(record["joint_components"])
+        record["score"] = bool(record["score"])
+        rows.append(record)
+    return rows
+
+
+def _physical_metrics_arrays(
+    result: KalmanFilterResult,
+    diagnostics: Mapping[str, np.ndarray],
+    timestamps: pd.DatetimeIndex,
+    validation_mask: np.ndarray,
+    settings: InflowTuningSettings,
+) -> dict[str, float]:
+    """Compute physical diagnostics directly from compact NumPy arrays."""
+
+    indices = np.flatnonzero(validation_mask)
+    validation_timestamps = timestamps[indices]
+    inflow = result.filtered_means[indices, 1] if len(indices) else np.array([])
+    finite_inflow = np.isfinite(inflow)
+    differences = np.diff(inflow)
+    intervals = (
+        np.diff(_timestamp_seconds(validation_timestamps))
+        if len(validation_timestamps) > 1
+        else np.array([], dtype=float)
+    )
+    normalized = differences / intervals if len(differences) else np.array([])
+    finite_norm = normalized[np.isfinite(normalized)]
+
+    def finite_mean(key: str) -> float:
+        values = diagnostics[key][indices]
+        values = values[np.isfinite(values)]
+        return float(np.mean(values)) if len(values) else np.nan
+
+    def autocorrelation_metrics(key: str) -> tuple[float, float]:
+        values = diagnostics[key][indices]
+        if (
+            len(validation_timestamps) < 2
+            or settings.innovation_max_lag.total_seconds() <= 0
+        ):
+            return np.nan, np.nan
+        frame = elapsed_lag_autocorrelation(
+            validation_timestamps, values, settings.innovation_max_lag
+        )
+        finite_frame = frame[np.isfinite(frame["autocorrelation"])]
+        if finite_frame.empty:
+            return np.nan, np.nan
+        row = finite_frame.iloc[
+            int(np.argmax(np.abs(finite_frame["autocorrelation"].to_numpy())))
+        ]
+        return float(abs(row["autocorrelation"])), float(row["lag_seconds"])
+
+    max_storage_ac, max_storage_lag = autocorrelation_metrics("storage_z")
+    max_outflow_ac, max_outflow_lag = autocorrelation_metrics("outflow_z")
+    max_conditional_ac, max_conditional_lag = autocorrelation_metrics(
+        "conditional_storage_z"
+    )
+    scored_storage = diagnostics["storage_innovation"][indices]
+    scored_storage = scored_storage[np.isfinite(scored_storage)]
+    joint_values = diagnostics["joint_nis"][indices]
+    joint_mask = np.isfinite(joint_values)
+    joint_components = diagnostics["joint_components"][indices][joint_mask]
+    joint_nis = (
+        float(np.sum(joint_values[joint_mask]) / np.sum(joint_components))
+        if np.any(joint_mask) and np.sum(joint_components)
+        else np.nan
+    )
+    autocorrelations = (max_storage_ac, max_outflow_ac, max_conditional_ac)
+    return {
+        "negative_inflow_frequency": float(np.mean(inflow[finite_inflow] < 0.0))
+        if np.any(finite_inflow)
+        else np.nan,
+        "inflow_change_median_per_second": float(np.median(finite_norm))
+        if len(finite_norm)
+        else np.nan,
+        "inflow_change_q95_per_second": float(np.quantile(np.abs(finite_norm), 0.95))
+        if len(finite_norm)
+        else np.nan,
+        "storage_bias": finite_mean("storage_z"),
+        "outflow_bias": finite_mean("outflow_z"),
+        "conditional_storage_bias": finite_mean("conditional_storage_z"),
+        "joint_nis": joint_nis,
+        "storage_nis": finite_mean("storage_nis"),
+        "outflow_nis": finite_mean("outflow_nis"),
+        "conditional_storage_nis": finite_mean("conditional_storage_nis"),
+        "causal_storage_prediction_rmse": (
+            float(np.sqrt(np.mean(scored_storage**2)))
+            if len(scored_storage)
+            else np.nan
+        ),
+        "causal_storage_prediction_bias": (
+            float(np.mean(scored_storage)) if len(scored_storage) else np.nan
+        ),
+        "max_storage_elapsed_lag_autocorrelation": max_storage_ac,
+        "max_storage_elapsed_lag_seconds": max_storage_lag,
+        "max_outflow_elapsed_lag_autocorrelation": max_outflow_ac,
+        "max_outflow_elapsed_lag_seconds": max_outflow_lag,
+        "max_conditional_storage_elapsed_lag_autocorrelation": max_conditional_ac,
+        "max_conditional_storage_elapsed_lag_seconds": max_conditional_lag,
+        "max_material_elapsed_lag_autocorrelation": (
+            max(value for value in autocorrelations if np.isfinite(value))
+            if any(np.isfinite(value) for value in autocorrelations)
+            else np.nan
+        ),
     }
 
 
@@ -1376,70 +2012,70 @@ def _horizon_frame(
     windows: Sequence[TuningWindow],
     settings: InflowTuningSettings,
     selected_q: float,
+    *,
+    plan: _DiagnosticPlan | None = None,
 ) -> pd.DataFrame:
+    if plan is None:
+        plan = _diagnostic_plan(prepared, windows, settings)
     records: list[dict[str, Any]] = []
     for q in q_values:
         candidate = passes.get(q)
         if candidate is None or candidate.filter_result is None:
             continue
-        tolerance = settings.horizon_tolerance
-        if tolerance is None:
-            cadence = float(np.median(prepared.elapsed_seconds))
-            tolerance_seconds = cadence / 2.0
-        else:
-            tolerance_seconds = tolerance.total_seconds()
-        for horizon in settings.forecast_horizons:
+        for horizon_index, horizon in enumerate(settings.forecast_horizons):
             values: list[tuple[float, float, float, bool]] = []
             horizon_seconds = horizon.total_seconds()
-            for window in windows:
-                for origin in range(2, len(prepared.timestamps) - 1):
-                    origin_timestamp = prepared.timestamps[origin]
-                    if not (window.start <= origin_timestamp < window.end):
+            for window_index, _window in enumerate(windows):
+                target_rows = plan.horizon_targets[(window_index, horizon_index)]
+                origins = np.flatnonzero(target_rows >= 0)
+                if not len(origins):
+                    continue
+                targets = target_rows[origins]
+                means = candidate.filter_result.filtered_means[origins].copy()
+                covariances = candidate.filter_result.filtered_covariances[
+                    origins
+                ].copy()
+                # Advance all origins in a vectorized candidate-independent
+                # rollout. Each origin remains causal, but matrix operations are
+                # performed over the origin axis instead of in Python per row.
+                for step in range(int(origins.min()), len(prepared.timestamps) - 1):
+                    active = (origins <= step) & (targets > step)
+                    if not np.any(active):
                         continue
-                    if origin_timestamp < prepared.timestamps[1] + pd.Timedelta(
-                        seconds=settings.warmup.total_seconds()
-                    ):
-                        continue
-                    target = origin_timestamp + pd.Timedelta(seconds=horizon_seconds)
-                    target_rows = [
-                        row
-                        for row in range(origin + 1, len(prepared.timestamps))
-                        if window.start <= prepared.timestamps[row] < window.end
-                        and prepared.timestamps[row] >= target
-                        and (prepared.timestamps[row] - target).total_seconds()
-                        <= tolerance_seconds
-                        and candidate.rows[row]["score"]
-                        and np.isfinite(prepared.observations[row, 0])
-                    ]
-                    if not target_rows:
-                        continue
-                    target_row = target_rows[0]
-                    mean = candidate.filter_result.filtered_means[origin].copy()
-                    covariance = candidate.filter_result.filtered_covariances[
-                        origin
-                    ].copy()
-                    for step in range(origin, target_row):
-                        mean, covariance = predict_state(
-                            mean,
-                            covariance,
-                            prepared.transitions[step],
-                            prepared.q_storage * prepared.storage_basis[step]
-                            + q * prepared.inflow_basis[step]
-                            + prepared.q_outflow * prepared.outflow_basis[step],
-                        )
-                    predicted = float(mean[0])
-                    variance = float(covariance[0, 0] + prepared.r[0, 0])
-                    observed = float(prepared.observations[target_row, 0])
+                    transition = prepared.transitions[step]
+                    process = (
+                        prepared.q_storage * prepared.storage_basis[step]
+                        + q * prepared.inflow_basis[step]
+                        + prepared.q_outflow * prepared.outflow_basis[step]
+                    )
+                    means[active] = np.einsum(
+                        "ij,cj->ci", transition, means[active]
+                    )
+                    covariances[active] = np.einsum(
+                        "ij,cjk,lk->cil", transition, covariances[active], transition
+                    ) + process
+                    covariances[active] = (
+                        covariances[active]
+                        + np.swapaxes(covariances[active], 1, 2)
+                    ) / 2.0
+                predicted = means[:, 0]
+                variance = covariances[:, 0, 0] + prepared.r[0, 0]
+                observed = prepared.observations[targets, 0]
+                residual = observed - predicted
+                valid = np.isfinite(variance) & (variance > 0.0)
+                for residual_value, variance_value in zip(
+                    residual[valid], variance[valid], strict=True
+                ):
                     try:
                         nll = marginal_predictive_nlpd(
-                            observed - predicted,
-                            variance,
+                            residual_value,
+                            variance_value,
                             max_jitter_fraction=settings.max_jitter_fraction,
                         )
-                        z = (observed - predicted) / sqrt(variance)
-                        values.append((nll, z, observed - predicted, abs(z) <= 1.96))
                     except ValueError:
                         continue
+                    z = residual_value / sqrt(variance_value)
+                    values.append((nll, z, residual_value, abs(z) <= 1.96))
             if values:
                 arr = np.asarray(values, dtype=float)
                 records.append(
@@ -1482,23 +2118,40 @@ def _r_sensitivity(
     settings: InflowTuningSettings,
     config: ReservoirConfig,
     selected_q: float,
+    *,
+    competitive_q: Sequence[float] = (),
+    plan: _DiagnosticPlan | None = None,
 ) -> pd.DataFrame | None:
     if not settings.r_sensitivity_multipliers:
         return None
     rows: list[dict[str, Any]] = []
     weights = _window_weights(windows)
+    if plan is None:
+        plan = _diagnostic_plan(prepared, windows, settings)
+    # Sensitivity is a robustness diagnostic around the selected decision. A
+    # small competitive neighborhood captures score movement while avoiding a
+    # second full candidate-grid evaluation for every multiplier.
+    sensitivity_q = (
+        tuple(q_values)
+        if settings.full_grid_sensitivity
+        else tuple(sorted(set(competitive_q) | {selected_q}))
+    )
+    sensitivity_prior = {
+        q: float(prior_values[q_values.index(q)]) for q in sensitivity_q
+    }
     for multiplier in settings.r_sensitivity_multipliers:
         scenario: list[_Pass] = []
-        for prior, q in zip(prior_values, q_values, strict=True):
+        for q in sensitivity_q:
             scenario.append(
                 _evaluate_candidate(
                     prepared,
-                    prior_sd=prior,
+                    prior_sd=sensitivity_prior[q],
                     q_inflow=q,
                     windows=windows,
                     settings=settings,
                     window_weights=weights,
                     r_override=np.asarray(config.r) * multiplier,
+                    plan=plan,
                 )
             )
         eligible = [
