@@ -12,9 +12,26 @@
 | `kalmone.reservoir_backend` | Adapts the physical model to the streaming pipeline. |
 | `kalmone.pipeline` | Generic initialization, ordering, replay, and delayed-release coordinator. |
 | `kalmone.core` | Public batch and reservoir-streaming adapters. |
+| `kalmone.pandas_api` | DataFrame convenience wrapper for the default batch adapter. |
+| `kalmone.bayesian_tuning` | Bayesian diagonal-noise search and compact frozen-configuration evaluation. |
 | `kalmone.reservoir_config` | Immutable, validated per-reservoir configuration. |
 | `kalmone.observations` / `flags` | Public input and output-provenance types. |
 | `kalmone.units` | Volume/flow-rate conversion systems. |
+| `kalmone.time_utils` | UTC normalization and elapsed-time validation helpers. |
+
+The package-level imports are the supported starting point for applications.
+The generic Kalman, RTS, model, backend, and pipeline types are also exported
+for advanced integrations; their contracts are listed in the
+[API reference](API_REFERENCE.md). Checkpoint encoding and low-level validation
+modules are internal implementation details and are not public serialization
+formats or extension points.
+
+Repository-specific workflows live outside the package in `applications/`:
+`applications/preparation.py` parses and aligns the checked-in Aquarius
+exports, while `applications/run_bayesian_tuner.py` provides the offline
+Bayesian calibration entry point.
+`Notebooks/prepare_reservoir_data.py` remains a compatibility import for
+existing notebooks.
 
 ## Reservoir state-space model
 
@@ -40,10 +57,15 @@ Storage, measured outflow, and latent true outflow remain model inputs or
 internal state; no public outflow result is exposed. Generic filter and
 smoothing types remain available for advanced integrations.
 
+Offline calibration uses `tune_inflow_noise_bayesian` with clean, aligned
+storage and discharge series. It proposes a new immutable configuration but
+does not persist or activate it. `evaluate_configuration` scores one frozen
+configuration on a separate period without performing another search.
+
 ## Data ownership and boundaries
 
-Kalmone does not read files, fetch data, parse timestamps, align series, or
+Kalmone does not read files, fetch or clean source data, align series, or
 deduplicate records. Callers manage reviewed configuration artifacts; the
-package validates the runtime contract—including timestamps,
+package validates the runtime contract—including timestamp indexes,
 matrix shapes, covariance properties, and missing observations—at the library
 boundary.

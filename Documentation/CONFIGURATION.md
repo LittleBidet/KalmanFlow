@@ -67,19 +67,16 @@ sensor accuracy, operating conditions, and historical data. Record the
 rationale in `metadata`, version the reviewed configuration, and validate it
 against a separate period before operational use.
 
-## Conservative inflow-noise tuning
+## Bayesian inflow-noise tuning
 
-For an offline proposal, use `tune_inflow_process_noise` with a fixed
-`ReservoirConfig` and predeclared `TuningWindow` intervals. Candidates are
-specified as `prior_hourly_increment_sd`; the tuner converts each value to the
-continuous random-walk diffusion `q_inflow = sd**2 / 3600`. Only `q[1, 1]`
-changes. `q_storage`, `q_outflow`, `r`, and `p0` remain fixed, and off-diagonal
-covariance matrices are rejected.
-
-The tuner runs one causal chronology per candidate and scores storage before
-each observation is assimilated. Equal validation-window weights and a paired
-uncertainty rule select the smallest candidate whose loss is practically
-equivalent to the best candidate. The returned configuration is proposed only;
-it is never persisted automatically. Supply a new
-`proposed_configuration_version` and review the warning, regime, horizon, and
-optional measurement-noise sensitivity tables before operational approval.
+For an offline proposal, use `tune_inflow_noise_bayesian` with a fixed
+`ReservoirConfig` and predeclared `ValidationWindow` intervals. The supplied
+`inflow_increment_sd_seeds` initialize the bounded Bayesian search for the five
+diagonal covariance terms. Bayesian evaluation requires `q`, `r`, and `p0` to
+be diagonal. The tuner runs a causal chronology per trial and scores the joint
+predictive innovation for whichever storage and outflow components are
+observed, before that row is assimilated. The returned configuration is
+proposed only; it is never persisted automatically. Supply a new
+`proposed_configuration_version`, review the compact report, and use
+`evaluate_configuration` with an explicit untouched `ValidationWindow` before
+operational approval.

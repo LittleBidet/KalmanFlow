@@ -5,7 +5,7 @@
 ## Lifecycle
 
 1. The pipeline accepts timezone-aware, strictly increasing observations.
-2. It stores the first usable observation and waits for the second valid storage sample to initialize the backend.
+2. It ignores leading missing-storage rows, then stores the first finite-storage observation (which must have finite discharge) and waits for the next finite storage sample to initialize the backend.
 3. Initialization creates two forward filter steps. Each later input creates one forward step, using the actual elapsed seconds since its predecessor.
 4. Each step enters the fixed-lag RTS smoother. A state is released only after the configured elapsed-time lag has passed.
 
@@ -40,7 +40,11 @@ restored = OnlineReservoirInflow.from_checkpoint(checkpoint, config=config)
 
 A checkpoint is bound to one `reservoir_id`; restore rejects a config with a different identifier. The checkpoint contains replay state, not a configuration fingerprint, so callers must use a compatible configuration. Restoration rebuilds the active smoothing window from its retained observations without re-emitting already released records.
 
-Checkpoints are unavailable during processing, before a successful processing result, or for streams created without a reservoir ID.
+Checkpoints are unavailable during processing, before a successful `process` or
+`process_many` result, after a failed processing call, or for streams created
+without a reservoir ID. The serialized bytes are intentionally an internal
+format; retain the compatible configuration and use the package's restore API
+instead of decoding them yourself.
 
 ## Resource bounds and failures
 

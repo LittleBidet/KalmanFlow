@@ -10,7 +10,12 @@ The package intentionally does not sort, align, deduplicate, interpolate, or imp
 
 ## Initialization and missing values
 
-Initialization waits for two finite storage readings and a finite discharge at the first of those readings. The first inflow rate is calculated with the water balance over those two storage samples. The second discharge may be missing.
+The stream ignores leading rows with missing storage. Its first finite storage
+reading must also have finite discharge; that row becomes the initialization
+anchor. The next finite storage reading completes initialization, even if its
+discharge is missing. The first inflow rate is calculated with the water
+balance over those two storage samples. A finite storage row with missing
+discharge before an anchor is therefore invalid rather than silently skipped.
 
 After initialization, either storage or discharge may be `NaN`. A finite component is still used as a partial Kalman observation. If both are `NaN`, the step is predict-only. A public estimate carrying any missing observation component receives the `PREDICTED` flag; fully observed steps are `NORMAL`.
 
@@ -49,16 +54,19 @@ Select and review continuous-time process noise (`q`), observation noise (`r`),
 and initial covariance (`p0`) for each reservoir before operational use.
 Document the rationale and configuration version in the configuration metadata.
 
-## Causal process-noise evaluation
+## Bayesian causal evaluation
 
-`tune_inflow_process_noise` is an offline calibration aid, not an adaptive
+`tune_inflow_noise_bayesian` is an offline calibration aid, not an adaptive
 streaming mode. It uses the forward Kalman filter and never calls the RTS
 smoother. Initialization rows and the configured warm-up period are excluded
-from scores. Validation observations can condition later predictions, as they
-would in operation, but cannot affect their own or earlier scores.
+from scores. Only rows inside the declared validation windows contribute to
+the objective. Earlier observations outside a window may still condition its
+causal starting state, and validation observations can condition later
+predictions, as they would in operation; no observation can affect its own or
+an earlier score.
 
-Use `evaluate_inflow_config` once a proposed configuration is frozen for a
+Use `evaluate_configuration` once a proposed configuration is frozen for a
 separate, untouched test period. Test results must not be used to change the
-candidate grid, windows, thresholds, or selected parameter. Filtered storage
+Bayesian search, windows, thresholds, or selected parameters. Filtered storage
 closure is a reconstruction diagnostic; it is not an independent predictive
 score when the ending storage observation has already been assimilated.

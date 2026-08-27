@@ -38,7 +38,7 @@ uv sync --all-groups
 
 ## Quick start
 
-Use `OnlineReservoirInflow` when observations arrive one at a time. Timestamps must be timezone-aware; the first completed initialization emits estimates for the first two valid storage observations.
+Use `OnlineReservoirInflow` when observations arrive one at a time. Timestamps must be timezone-aware; the first completed initialization emits estimates for its first finite-storage/discharge anchor and the next finite storage observation.
 
 ```python
 from datetime import UTC, datetime, timedelta
@@ -83,6 +83,8 @@ The scalar values above only make the example runnable; select and validate nois
 | `OnlineReservoirInflow` | You process one reservoir’s observations as they arrive. |
 | `OnlineReservoirInflow.from_config` | You need a configured, checkpoint-capable streaming estimator. |
 | `OnlineInflowPipeline` | You are integrating a custom backend or smoother. |
+| `tune_inflow_noise_bayesian` | You want to propose five diagonal `q`/`r` noise terms from causal innovation scores. |
+| `evaluate_configuration` | You want to assess one frozen configuration on an untouched period without searching. |
 | Notebook-local `validation.py` | You want hourly proxy-agreement, lag, and storage-closure validation tables and plots. |
 
 ## Documentation
@@ -92,7 +94,8 @@ The scalar values above only make the example runnable; select and validate nois
 - [Online pipeline](Documentation/ONLINE_INFLOW_PIPELINE.md): lifecycle, checkpoints, and failure behavior.
 - [Configuration](Documentation/CONFIGURATION.md): complete configuration example, unit conventions, and parameter selection.
 - [Validation](Documentation/VALIDATION.md): regular comparison frames, upstream-proxy metrics, lag selection, and storage closure.
-- [Process-noise tuning plan](Documentation/IMPLEMENTATION_PLAN_PROCESS_NOISE_TUNING.md): causal candidate selection and untouched-test protocol.
+- [Bayesian innovation noise tuning](Documentation/BAYESIAN_NOISE_TUNING.md): five-parameter causal covariance search without true inflow labels.
+- [API reference](Documentation/API_REFERENCE.md): every package-level export, plus the advanced module interfaces.
 
 ## Requirements and units
 
