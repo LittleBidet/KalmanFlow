@@ -18,16 +18,18 @@ from kalmone import (
     evaluate_configuration,
     tune_inflow_noise_bayesian,
 )
-from kalmone import bayesian_tuning as bayesian_module
 from kalmone.bayesian_tuning import (
+    _candidate,
+    _types,
+)
+from kalmone.bayesian_tuning._diagnostics import (
     _aggregate_arrays,
     _elapsed_lag_autocorrelation,
     _marginal_predictive_nlpd,
     _paired_standard_error,
-    _prepare,
     _storage_conditional_nlpd,
-    _validate_windows,
 )
+from kalmone.bayesian_tuning._preparation import _prepare, _validate_windows
 from kalmone.models import ReservoirStateSpaceModel
 
 
@@ -297,7 +299,7 @@ def test_bayesian_first_pass_releases_filter_and_diagnostics(
 ) -> None:
     storage, discharge, windows = _inputs()
     settings, search = _settings()
-    real_evaluate = bayesian_module._evaluate_candidate
+    real_evaluate = _candidate._evaluate_candidate
     first_passes = []
 
     def spy_evaluate(*args, **kwargs):
@@ -305,7 +307,7 @@ def test_bayesian_first_pass_releases_filter_and_diagnostics(
         first_passes.append(candidate)
         return candidate
 
-    monkeypatch.setattr(bayesian_module, "_evaluate_candidate", spy_evaluate)
+    monkeypatch.setattr(_candidate, "_evaluate_candidate", spy_evaluate)
     tune_inflow_noise_bayesian(
         storage,
         discharge,
@@ -578,7 +580,7 @@ def test_bayesian_report_surface_is_compact() -> None:
         "eligible",
         "competitive",
         "selected",
-        *bayesian_module._PARAMETER_NAMES,
+        *_types._PARAMETER_NAMES,
     }.issubset(result.candidate_summary.columns)
     assert {
         "storage_nlpd",

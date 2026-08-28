@@ -43,6 +43,19 @@ residual is predicted storage change minus observed storage change, using the
 estimate and outflow at the current regular timestamp. The closure table  
 reports RMSE, MAE, bias, paired observations, and coverage.
 
+The inflow behavior table reports finite observations and diagnostics that do
+not require knowing total inflow: `negative_hour_frequency_percent` is the
+percentage of finite regular observations below zero;
+`mean_negative_inflow_cfs` is the mean magnitude of negative estimates in cfs;
+and `mean_absolute_hourly_change_cfs` is the mean absolute change between
+adjacent finite estimates in cfs. Missing and nonfinite values are excluded
+from the finite count and break adjacency, so a value on either side of a gap
+is not compared. Frequency is `NaN` when there are no finite observations,
+negative magnitude is `NaN` when there are no negative observations, and mean
+absolute change is `NaN` when there are no valid adjacent pairs. The latter
+metric is interpreted as hourly because the validation frame is configured to
+the regular hourly cadence.
+
 ## Bayesian calibration
 
 The package-level `tune_inflow_noise_bayesian` workflow is separate from these

@@ -4,8 +4,9 @@
 
 `applications/run_bayesian_tuner.py` is the offline tuning workflow. Its
 `run_bayesian_tuner(...)` function accepts `project_root`, `reservoir`,
-`data_start`, `data_end`, and `output_path`, and searches five diagonal
-covariance terms informed by the observed storage and outflow innovations:
+`data_start`, `data_end`, `output_path`, and the optional
+`report_output_path`. It searches five diagonal covariance terms informed by
+the observed storage and outflow innovations:
 
 * `q_storage`, `q_inflow`, and `q_outflow`;
 * `r_storage` and `r_outflow`.
@@ -37,16 +38,24 @@ insufficiently scored trials. Statistically competitive trials are identified
 with paired window differences; final selection prefers lower calibration
 violation, then proximity to the reviewed base configuration, then objective.
 
-## Report and held-out evaluation
+## Output files and held-out evaluation
 
-The output JSON includes a compact candidate table (trial, acquisition source,
-five parameters, objective, eligibility, and selection flags), selected-trial
-per-window efficacy, compact upstream-proxy diagnostics when supplied, and the
-proposed immutable configuration. A separate final evaluation interval should
-be reserved and evaluated with `evaluate_configuration` and an explicit
-`ValidationWindow` after tuning. The application runner divides its requested
-segment into three calibration windows; it does not reserve a final test
-segment automatically.
+The runner writes the proposed immutable `ReservoirConfig` to `output_path`.
+This compact configuration JSON is the default artifact and contains the
+complete configuration needed by a downstream application. Without an
+explicit `output_path`, it is written beneath `Outputs/bayesian_tuning`.
+
+Pass `report_output_path` to additionally write a detailed tuning audit. The
+report contains the compact candidate table (trial, acquisition source, five
+parameters, objective, eligibility, and selection flags), selected-trial
+per-window efficacy, compact upstream-proxy diagnostics when supplied, and a
+reference to the selected configuration artifact. It does not duplicate the
+full configuration JSON. The two resolved output paths must be different.
+
+A separate final evaluation interval should be reserved and evaluated with
+`evaluate_configuration` and an explicit `ValidationWindow` after tuning. The
+application runner divides its requested segment into three calibration
+windows; it does not reserve a final test segment automatically.
 
 Runtime diagnostics distinguish Gaussian-process `acquisition_seconds` from
 `candidate_evaluation_seconds`, which covers each compact causal evaluation.
@@ -120,8 +129,23 @@ python applications/run_bayesian_tuner.py
 
 Direct execution uses the reviewed constants near the top of the runner;
 edit those constants first or call `run_bayesian_tuner(...)` from Python with
-explicit arguments. Without an explicit `output_path`, the JSON report is
-written beneath `Outputs/bayesian_tuning`.
+explicit arguments. Without an explicit `output_path`, the JSON configuration is
+written beneath `Outputs/bayesian_tuning` as the compact selected
+configuration. Pass `report_output_path` to additionally write the detailed
+tuning audit report; it must resolve to a different file.
+
+For example, to produce both artifacts explicitly:
+
+```python
+from pathlib import Path
+
+from applications.run_bayesian_tuner import run_bayesian_tuner
+
+run_bayesian_tuner(
+    output_path=Path("Outputs/bayesian_tuning/chesbro-config.json"),
+    report_output_path=Path("Outputs/bayesian_tuning/chesbro-report.json"),
+)
+```
 
 The package API is:
 

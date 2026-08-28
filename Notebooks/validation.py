@@ -134,6 +134,7 @@ class ValidationOutputs:
     upstream_proxy_agreement: pd.DataFrame
     best_lag_summary: pd.DataFrame
     storage_closure: pd.DataFrame
+    inflow_behavior: pd.DataFrame
     cross_correlation_plot: Any | None = None
     estimate_upstream_scatter_plot: Any | None = None
     interpretation: str = (
@@ -141,8 +142,17 @@ class ValidationOutputs:
         "upstream proxy, not total-inflow accuracy. KGE bias and variability "
         "components may be poor even when timing is correct because the gauge "
         "represents only part of the contributing flow. Storage closure is "
-        "stronger evidence of internal consistency."
+        "stronger evidence of internal consistency. Inflow behavior reports "
+        "the frequency and mean magnitude of negative estimates plus the mean "
+        "absolute change between adjacent finite estimates. These diagnostics "
+        "do not require knowing total inflow."
     )
+
+    @property
+    def inflow_behavior_metrics(self) -> pd.DataFrame:
+        """Alias for the inflow behavior metrics table."""
+
+        return self.inflow_behavior
 
 
 def build_validation_frame(
@@ -430,6 +440,62 @@ def lagged_correlation(
     }
 
 
+def inflow_behavior_metrics(
+    estimate: pd.Series | Iterable[float],
+    *,
+    evaluation_frequency: str | pd.Timedelta = "1h",
+) -> dict[str, float | int]:
+    """Return finite-count, negative-inflow, and adjacent-change metrics.
+
+    ``negative_hour_frequency_percent`` is the percentage of finite estimates
+    below zero. ``mean_negative_inflow_cfs`` is the mean magnitude of those
+    negative estimates, in cfs. ``mean_absolute_hourly_change_cfs`` is the
+    mean absolute change between adjacent finite estimates, in cfs. Missing
+    and nonfinite values are excluded from the finite count and break the
+    adjacency sequence; a finite estimate before a gap is never compared with
+    a finite estimate after it. ``evaluation_frequency`` is validated for API
+    compatibility; callers should use this helper on the regular hourly frame
+    produced by :func:`build_validation_frame` when interpreting the hourly
+    change metric.
+
+    The frequency is ``NaN`` when no finite estimates are available. The mean
+    negative inflow is ``NaN`` when there are no negative estimates, and the
+    mean absolute change is ``NaN`` when there are fewer than two adjacent
+    finite estimates.
+    """
+
+    _positive_timedelta(evaluation_frequency, name="evaluation_frequency")
+    values = _inflow_values(estimate)
+    finite = np.isfinite(values)
+    finite_count = int(np.sum(finite))
+
+    if finite_count:
+        negative = finite & (values < 0.0)
+        negative_count = int(np.sum(negative))
+        negative_frequency = float(negative_count / finite_count * 100.0)
+        mean_negative = (
+            float(np.mean(np.abs(values[negative])))
+            if negative_count
+            else float("nan")
+        )
+    else:
+        negative_frequency = float("nan")
+        mean_negative = float("nan")
+
+    adjacent = finite[:-1] & finite[1:]
+    changes = np.abs(values[1:][adjacent] - values[:-1][adjacent])
+    mean_absolute_change = (
+        float(np.mean(changes)) if changes.size else float("nan")
+    )
+
+    return {
+        "finite_observations": finite_count,
+        "negative_hour_frequency_percent": negative_frequency,
+        "mean_negative_inflow_cfs": mean_negative,
+        "mean_absolute_hourly_change_cfs": mean_absolute_change,
+    }
+
+
 def storage_closure_metrics(
     estimate: pd.Series | Iterable[float],
     storage: pd.Series | Iterable[float],
@@ -462,6 +528,9 @@ def storage_closure_metrics(
         "rmse": float("nan"),
         "mae": float("nan"),
         "bias": float("nan"),
+        "rmse_cfs": float("nan"),
+        "mae_cfs": float("nan"),
+        "bias_cfs": float("nan"),
     }
     if possible == 0:
         return result
@@ -476,6 +545,7 @@ def storage_closure_metrics(
         & (elapsed[1:] > 0.0)
     )
     residual = predicted_change[valid] - observed_change[valid]
+    elapsed_valid = elapsed[1:][valid]
     paired = int(residual.size)
     result.update(
         {
@@ -485,11 +555,15 @@ def storage_closure_metrics(
     )
     if not paired:
         return result
+    residual_cfs = residual / (elapsed_valid * factor)
     result.update(
         {
             "rmse": float(np.sqrt(np.mean(residual**2))),
             "mae": float(np.mean(np.abs(residual))),
             "bias": float(np.mean(residual)),
+            "rmse_cfs": float(np.sqrt(np.mean(residual_cfs**2))),
+            "mae_cfs": float(np.mean(np.abs(residual_cfs))),
+            "bias_cfs": float(np.mean(residual_cfs)),
         }
     )
     return result
@@ -519,6 +593,7 @@ def generate_validation_outputs(
     agreement_rows: list[dict[str, object]] = []
     lag_rows: list[dict[str, object]] = []
     closure_rows: list[dict[str, object]] = []
+    behavior_rows: list[dict[str, object]] = []
     lag_results: dict[str, dict[str, object]] = {}
     train_lag_results: dict[str, dict[str, object]] = {}
     for name in estimate_names:
@@ -592,10 +667,16 @@ def generate_validation_outputs(
             evaluation_frequency=settings.evaluation_frequency,
         )
         closure_rows.append({"estimate": display_name, **closure})
+        behavior = inflow_behavior_metrics(
+            evaluation[name],
+            evaluation_frequency=settings.evaluation_frequency,
+        )
+        behavior_rows.append({"estimate": display_name, **behavior})
 
     agreement_table = pd.DataFrame(agreement_rows).set_index("estimate")
     lag_table = pd.DataFrame(lag_rows).set_index("estimate")
     closure_table = pd.DataFrame(closure_rows).set_index("estimate")
+    behavior_table = pd.DataFrame(behavior_rows).set_index("estimate")
 
     cross_plot = None
     scatter_plot = None
@@ -608,6 +689,7 @@ def generate_validation_outputs(
         upstream_proxy_agreement=agreement_table,
         best_lag_summary=lag_table,
         storage_closure=closure_table,
+        inflow_behavior=behavior_table,
         cross_correlation_plot=cross_plot,
         estimate_upstream_scatter_plot=scatter_plot,
     )
@@ -852,6 +934,17 @@ def _triple_values(
     return values[0], values[1], values[2], count, elapsed
 
 
+def _inflow_values(estimate: pd.Series | Iterable[float]) -> np.ndarray:
+    if isinstance(estimate, pd.Series):
+        series = _numeric_series(estimate, "estimate")
+        return series.to_numpy(dtype=float)
+
+    values = np.asarray(list(estimate), dtype=float)
+    if values.ndim != 1:
+        raise ValueError("estimate must be a one-dimensional data series")
+    return values
+
+
 def _numeric_series(series: pd.Series, name: str) -> pd.Series:
     result = pd.to_numeric(series, errors="coerce").copy()
     if isinstance(result.index, pd.DatetimeIndex) and result.index.tz is not None:
@@ -993,6 +1086,7 @@ __all__ = [
     "ValidationSettings",
     "build_validation_frame",
     "generate_validation_outputs",
+    "inflow_behavior_metrics",
     "lagged_correlation",
     "plot_cross_correlation",
     "plot_estimate_upstream_scatter",

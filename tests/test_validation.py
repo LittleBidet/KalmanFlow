@@ -14,6 +14,7 @@ from validation import (  # noqa: E402
     ValidationSettings,
     build_validation_frame,
     generate_validation_outputs,
+    inflow_behavior_metrics,
     lagged_correlation,
     storage_closure_metrics,
     upstream_proxy_metrics,
@@ -156,6 +157,74 @@ def test_storage_closure_is_perfect_for_a_known_water_balance() -> None:
     assert result["rmse"] == pytest.approx(0.0)
     assert result["mae"] == pytest.approx(0.0)
     assert result["bias"] == pytest.approx(0.0)
+    assert result["rmse_cfs"] == pytest.approx(0.0)
+    assert result["mae_cfs"] == pytest.approx(0.0)
+    assert result["bias_cfs"] == pytest.approx(0.0)
+
+
+def test_inflow_behavior_reports_frequency_severity_and_hourly_change() -> None:
+    index = pd.DatetimeIndex(
+        [
+            "2024-01-01 00:00Z",
+            "2024-01-01 01:00Z",
+            "2024-01-01 03:00Z",
+        ]
+    )
+    result = inflow_behavior_metrics(pd.Series([0.0, 3600.0, 0.0], index=index))
+
+    assert result["finite_observations"] == 3
+    assert result["negative_hour_frequency_percent"] == pytest.approx(0.0)
+    assert np.isnan(result["mean_negative_inflow_cfs"])
+    assert result["mean_absolute_hourly_change_cfs"] == pytest.approx(3600.0)
+
+
+def test_inflow_behavior_ignores_missing_values_without_bridging_gaps() -> None:
+    index = _hourly_index(4)
+    result = inflow_behavior_metrics(pd.Series([1.0, np.nan, 3.0, np.nan], index=index))
+
+    assert result["finite_observations"] == 2
+    assert result["negative_hour_frequency_percent"] == pytest.approx(0.0)
+    assert np.isnan(result["mean_negative_inflow_cfs"])
+    assert np.isnan(result["mean_absolute_hourly_change_cfs"])
+
+
+def test_inflow_behavior_negative_metrics_ignore_missing_and_all_missing() -> None:
+    result = inflow_behavior_metrics([-1.0, np.nan, 2.0, -3.0])
+    assert result["finite_observations"] == 3
+    assert result["negative_hour_frequency_percent"] == pytest.approx(2.0 / 3.0 * 100.0)
+    assert result["mean_negative_inflow_cfs"] == pytest.approx(2.0)
+    assert result["mean_absolute_hourly_change_cfs"] == pytest.approx(5.0)
+
+    empty = inflow_behavior_metrics([np.nan, np.inf, -np.inf])
+    assert empty["finite_observations"] == 0
+    assert np.isnan(empty["negative_hour_frequency_percent"])
+    assert np.isnan(empty["mean_negative_inflow_cfs"])
+    assert np.isnan(empty["mean_absolute_hourly_change_cfs"])
+
+
+def test_inflow_behavior_handles_zero_and_constant_window() -> None:
+    result = inflow_behavior_metrics([0.0, 0.0, 0.0])
+
+    assert result["finite_observations"] == 3
+    assert result["negative_hour_frequency_percent"] == pytest.approx(0.0)
+    assert np.isnan(result["mean_negative_inflow_cfs"])
+    assert result["mean_absolute_hourly_change_cfs"] == pytest.approx(0.0)
+
+
+def test_storage_closure_reports_volume_and_cfs_errors() -> None:
+    result = storage_closure_metrics(
+        [1.0, 1.0, 1.0],
+        [0.0, 3599.0, 7198.0],
+        [0.0, 0.0, 0.0],
+        flow_to_volume_per_second=1.0,
+    )
+
+    assert result["rmse"] == pytest.approx(1.0)
+    assert result["mae"] == pytest.approx(1.0)
+    assert result["bias"] == pytest.approx(1.0)
+    assert result["rmse_cfs"] == pytest.approx(1.0 / 3600.0)
+    assert result["mae_cfs"] == pytest.approx(1.0 / 3600.0)
+    assert result["bias_cfs"] == pytest.approx(1.0 / 3600.0)
 
 
 def test_training_lag_is_frozen_for_evaluation() -> None:
@@ -186,6 +255,18 @@ def test_training_lag_is_frozen_for_evaluation() -> None:
     )
 
     outputs = generate_validation_outputs(comparison, settings=settings)
+
+    assert len(outputs.inflow_behavior) == 4
+    assert len(outputs.storage_closure) == 4
+    assert {
+        "finite_observations",
+        "negative_hour_frequency_percent",
+        "mean_negative_inflow_cfs",
+        "mean_absolute_hourly_change_cfs",
+    }.issubset(outputs.inflow_behavior.columns)
+    assert {"rmse_cfs", "mae_cfs", "bias_cfs"}.issubset(
+        outputs.storage_closure.columns
+    )
 
     assert (
         outputs.best_lag_summary.loc[

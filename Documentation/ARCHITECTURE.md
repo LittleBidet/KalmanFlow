@@ -13,7 +13,7 @@
 | `kalmone.pipeline` | Generic initialization, ordering, replay, and delayed-release coordinator. |
 | `kalmone.core` | Public batch and reservoir-streaming adapters. |
 | `kalmone.pandas_api` | DataFrame convenience wrapper for the default batch adapter. |
-| `kalmone.bayesian_tuning` | Bayesian diagonal-noise search and compact frozen-configuration evaluation. |
+| `kalmone.bayesian_tuning` | Public façade for Bayesian diagonal-noise search and compact frozen-configuration evaluation; implementation is split across preparation, diagnostics, candidate, optimization, proxy, and workflow modules. |
 | `kalmone.reservoir_config` | Immutable, validated per-reservoir configuration. |
 | `kalmone.observations` / `flags` | Public input and output-provenance types. |
 | `kalmone.units` | Volume/flow-rate conversion systems. |

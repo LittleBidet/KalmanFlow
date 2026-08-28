@@ -41,8 +41,8 @@ if TYPE_CHECKING:
 
 
 RESERVOIR = "Chesbro"
-DATA_START = pd.Timestamp("2010-01-01T00:00:00Z")
-DATA_END = pd.Timestamp("2025-01-01T00:00:00Z")
+DATA_START = pd.Timestamp("2022-10-01T00:00:00Z")
+DATA_END = pd.Timestamp("2023-02-01T00:00:00Z")
 ASOF_TOLERANCE = pd.Timedelta("20min")
 BASE_CONFIGURATION_VERSION = "reviewed-base-v1"
 PROPOSED_CONFIGURATION_VERSION = "2026-08-bayesian-noise-candidate"
@@ -200,32 +200,66 @@ def _frame_records(frame: pd.DataFrame | None) -> list[dict[str, Any]]:
     return _json_value(frame.to_dict(orient="records"))
 
 
+def _config_payload(config: ReservoirConfig) -> dict[str, Any]:
+    """Return the JSON representation of a complete reservoir configuration."""
+
+    return {
+        "reservoir_id": config.reservoir_id,
+        "reservoir_name": config.reservoir_name,
+        "q": config.q,
+        "r": config.r,
+        "p0": config.p0,
+        "smoothing_lag_seconds": config.smoothing_lag,
+        "initialization_strategy": config.initialization_strategy,
+        "inflow_units": config.inflow_units,
+        "model_version": config.model_version,
+        "configuration_version": config.configuration_version,
+        "metadata": config.metadata,
+        "unit_system": {
+            "volume_label": config.unit_system.volume_label,
+            "flow_label": config.unit_system.flow_label,
+            "flow_to_volume_per_second": config.unit_system.flow_to_volume_per_second,
+        },
+    }
+
+
+def _write_json(payload: object, output_path: Path) -> Path:
+    destination = Path(output_path).expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(_json_value(payload), indent=2, sort_keys=True, allow_nan=False)
+        + "\n",
+        encoding="utf-8",
+    )
+    return destination
+
+
+def export_reservoir_config(config: ReservoirConfig, output_path: Path) -> Path:
+    """Write a complete, compact ``ReservoirConfig`` JSON artifact."""
+
+    return _write_json(_config_payload(config), output_path)
+
+
 def export_bayesian_tuning_report(
-    result: BayesianTuningResult, output_path: Path
+    result: BayesianTuningResult,
+    output_path: Path,
+    *,
+    configuration_path: Path | None = None,
 ) -> Path:
-    """Write the compact trial, selection, and efficacy report as JSON."""
+    """Write the detailed trial, selection, and efficacy report as JSON.
+
+    The selected configuration is written by :func:`export_reservoir_config`.
+    This report carries its identity and optional artifact path only, avoiding
+    a second copy of the complete configuration.
+    """
 
     config = result.selected_config
     payload = {
-        "selected_config": {
+        "selected_config_reference": {
             "reservoir_id": config.reservoir_id,
             "reservoir_name": config.reservoir_name,
-            "q": config.q,
-            "r": config.r,
-            "p0": config.p0,
-            "smoothing_lag_seconds": config.smoothing_lag,
-            "initialization_strategy": config.initialization_strategy,
-            "inflow_units": config.inflow_units,
-            "model_version": config.model_version,
             "configuration_version": config.configuration_version,
-            "metadata": config.metadata,
-            "unit_system": {
-                "volume_label": config.unit_system.volume_label,
-                "flow_label": config.unit_system.flow_label,
-                "flow_to_volume_per_second": (
-                    config.unit_system.flow_to_volume_per_second
-                ),
-            },
+            "model_version": config.model_version,
         },
         "selection": {
             "selected_parameters": result.selected_parameters,
@@ -240,14 +274,11 @@ def export_bayesian_tuning_report(
         "window_diagnostics": _frame_records(result.window_diagnostics),
         "proxy_diagnostics": _frame_records(result.proxy_diagnostics),
     }
-    destination = Path(output_path).expanduser().resolve()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(
-        json.dumps(_json_value(payload), indent=2, sort_keys=True, allow_nan=False)
-        + "\n",
-        encoding="utf-8",
-    )
-    return destination
+    if configuration_path is not None:
+        payload["selected_config_reference"]["path"] = str(
+            Path(configuration_path).expanduser().resolve()
+        )
+    return _write_json(payload, output_path)
 
 
 def _print_result(result: BayesianTuningResult) -> None:
@@ -274,8 +305,13 @@ def run_bayesian_tuner(
     data_start: object | None = None,
     data_end: object | None = None,
     output_path: Path | None = None,
+    report_output_path: Path | None = None,
 ) -> BayesianTuningResult:
-    """Prepare data, run Bayesian tuning, export JSON, and return the result."""
+    """Prepare data, run Bayesian tuning, export artifacts, and return the result.
+
+    ``output_path`` receives the compact selected configuration. A detailed
+    tuning report is written only when ``report_output_path`` is supplied.
+    """
 
     root = (
         PROJECT_ROOT
@@ -283,6 +319,22 @@ def run_bayesian_tuner(
         else Path(project_root).expanduser().resolve()
     )
     selected_reservoir = RESERVOIR if reservoir is None else reservoir
+    default_output_path = (
+        root / OUTPUT_DIRECTORY / f"{str(selected_reservoir).strip().casefold()}-"
+        f"{PROPOSED_CONFIGURATION_VERSION}.json"
+    )
+    destination = (
+        (default_output_path if output_path is None else Path(output_path))
+        .expanduser()
+        .resolve()
+    )
+    report_destination = (
+        None
+        if report_output_path is None
+        else Path(report_output_path).expanduser().resolve()
+    )
+    if report_destination is not None and report_destination == destination:
+        raise ValueError("output_path and report_output_path must be different files")
     start = _timestamp(DATA_START if data_start is None else data_start, "DATA_START")
     end = _timestamp(DATA_END if data_end is None else data_end, "DATA_END")
     if end < start:
@@ -316,16 +368,18 @@ def run_bayesian_tuner(
         upstream_proxy=upstream_proxy,
         proposed_configuration_version=PROPOSED_CONFIGURATION_VERSION,
     )
-    destination = (
-        root
-        / OUTPUT_DIRECTORY
-        / f"{base_config.reservoir_id}-{PROPOSED_CONFIGURATION_VERSION}.json"
-        if output_path is None
-        else Path(output_path)
-    )
-    exported_path = export_bayesian_tuning_report(result, destination)
+    exported_config_path = export_reservoir_config(result.selected_config, destination)
+    exported_report_path = None
+    if report_destination is not None:
+        exported_report_path = export_bayesian_tuning_report(
+            result,
+            report_destination,
+            configuration_path=exported_config_path,
+        )
     _print_result(result)
-    print(f"\nBayesian tuning report exported to: {exported_path}")
+    print(f"\nBayesian tuning configuration exported to: {exported_config_path}")
+    if exported_report_path is not None:
+        print(f"Bayesian tuning report exported to: {exported_report_path}")
     return result
 
 
