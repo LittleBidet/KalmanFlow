@@ -175,23 +175,20 @@ def _prepare(
     if not np.all(np.isfinite(initial_mean)):
         raise BayesianTuningError("initial state is not finite")
     return _Prepared(
-        index,
-        positions,
-        timestamps,
-        observations,
-        elapsed,
-        transitions,
-        storage_basis,
-        inflow_basis,
-        outflow_basis,
-        initial_mean,
-        p0.copy(),
-        float(q[0, 0]),
-        float(q[2, 2]),
-        r.copy(),
-        model,
-        _timestamp_seconds(index[positions]),
-        np.isfinite(observations),
+        index=index,
+        timestamps=timestamps,
+        observations=observations,
+        transitions=transitions,
+        storage_basis=storage_basis,
+        inflow_basis=inflow_basis,
+        outflow_basis=outflow_basis,
+        initial_mean=initial_mean,
+        initial_covariance=p0.copy(),
+        q_storage=float(q[0, 0]),
+        q_outflow=float(q[2, 2]),
+        r=r.copy(),
+        model=model,
+        finite_observations=np.isfinite(observations),
     )
 
 

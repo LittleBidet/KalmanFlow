@@ -15,7 +15,7 @@ compatibility promise.
 | `Observation(timestamp, storage, discharge)` | Immutable streaming input. Timestamp must be timezone-aware; use `NaN` for a missing value after initialization. |
 | `OnlineReservoirInflow` | Default acre-ft/cfs streaming estimator. Construct with the five scalar diagonal noise values; use `process`, `process_many`, `initialized`, and `pending_count`. |
 | `OnlineReservoirInflow.from_config(config)` | Creates a stream from reviewed configuration, including its units and smoothing lag. |
-| `OnlineReservoirInflow.from_checkpoint(checkpoint, config=...)` | Restores a configured stream. The configuration must have the checkpoint's reservoir ID and must otherwise be compatible. |
+| `OnlineReservoirInflow.from_checkpoint(checkpoint, config=...)` | Restores a configured stream. The reservoir ID and fingerprinted model, covariance, lag, and unit settings must match. |
 | `OnlineReservoirInflow.checkpoint()` | Produces resumable state after a successful call. It requires a reservoir ID; streams made with `from_config` have one. |
 | `ReservoirFlowEstimate` | One timestamped inflow value with `prediction_flag` and `smoothing_flag`. |
 | `ReservoirFlowUpdate` | The streaming return value: `filtered_inflows` are causal and `revised_inflows` are absolute, finalized replacements. |
@@ -60,7 +60,8 @@ semidefinite; `r` must have a strictly positive diagonal. See
 
 Tuning requires diagonal `q`, `r`, and `p0`, clean matched pandas series, at
 least three positive inflow-increment seeds, and at least three distinct,
-non-overlapping windows. An optional upstream series is a shape/timing
+non-overlapping windows. Every seed is evaluated, so `total_trials` must be at
+least the number of seeds. An optional upstream series is a shape/timing
 diagnostic only, not a total-inflow label or Kalman observation. See
 [Bayesian noise tuning](BAYESIAN_NOISE_TUNING.md) for selection and report
 details.
@@ -73,7 +74,7 @@ reservoir units.
 
 | Export | Purpose |
 | --- | --- |
-| `kalman_filter(...)` | Batch linear-Gaussian filter. Accepts shared or per-step transition, process, observation, and covariance matrices; supports offsets and matrix controls. `NaN` observation components are omitted per step. |
+| `kalman_filter(...)` | Batch linear-Gaussian filter. Transition, process, offset, and control arrays may be shared or have exactly `n_times - 1` entries; observation arrays may be shared or have exactly `n_times` entries. `NaN` observation components are omitted per step. |
 | `predict_state(...)` | Predicts one state mean and covariance, optionally with a control offset. |
 | `initial_filter_step(...)` / `kalman_step(...)` | Create immutable timestamped filter records for the initial or a later update. |
 | `FilterStep` / `KalmanFilterResult` | Filter records and complete batch outputs, including innovations, innovation covariance, update mask, transitions, and log likelihood. |

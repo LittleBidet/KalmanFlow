@@ -26,6 +26,8 @@ deployment.
 
 ## Install
 
+Kalmone requires Python 3.14 or newer.
+
 ```bash
 pip install kalmone
 ```
@@ -99,7 +101,11 @@ The scalar values above only make the example runnable; select and validate nois
 
 ## Requirements and units
 
-Inputs must be pre-cleaned and timestamped with timezone-aware, strictly increasing values. The default model uses acre-feet for storage and cfs for flow rates. Missing storage or discharge is represented by `NaN`; available components still participate in a partial update.
+Inputs must be pre-cleaned and indexed by unique, timezone-aware, strictly
+increasing timestamps. Batch storage and discharge series must have exactly
+matching indexes. The default model uses acre-feet for storage and cfs for flow
+rates. Missing storage or discharge is represented by `NaN`; available
+components still participate in a partial update.
 
 The default state is `[storage, inflow_rate, true_outflow_rate]`. Storage and
 measured outflow are model inputs, and true outflow is an internal state. The

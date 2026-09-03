@@ -57,13 +57,13 @@ def _evaluate_candidate(
     except (ValueError, np.linalg.LinAlgError, FloatingPointError) as error:
         reasons.append(f"filter failed: {error}")
         return _Pass(
-            q_inflow,
-            None,
-            {w.name: {"storage_nlpd": np.nan, "storage_count": 0} for w in windows},
-            {},
-            0,
-            0.0,
-            reasons,
+            filter_result=None,
+            window_rows={
+                w.name: {"storage_nlpd": np.nan, "storage_count": 0}
+                for w in windows
+            },
+            physical={},
+            reasons=reasons,
         )
     if not (
         np.isfinite(result.filtered_means).all()
@@ -93,9 +93,7 @@ def _evaluate_candidate(
     diagnostics["joint_components"] = prepared.finite_observations.sum(axis=1).astype(
         float
     )
-    diagnostics["score"] = plan.score_mask.astype(float)
     regularization_count = 0
-    max_jitter = 0.0
     for row, timestamp in enumerate(prepared.timestamps):
         finite = prepared.finite_observations[row]
         innovation = result.innovations[row]
@@ -119,7 +117,6 @@ def _evaluate_candidate(
                 diagnostics["joint_nis"][row] = quad
                 diagnostics["jitter"][row] = jitter
                 regularization_count += int(jitter > 0.0)
-                max_jitter = max(max_jitter, jitter)
             for component, key in ((0, "storage"), (1, "outflow")):
                 if finite[component]:
                     variance = covariance[component, component]
@@ -177,12 +174,9 @@ def _evaluate_candidate(
     if regularization_count > settings.max_regularized_steps:
         reasons.append("excessive covariance regularization")
     return _Pass(
-        q_inflow,
-        result,
-        window_rows,
-        physical,
-        regularization_count,
-        max_jitter,
-        list(dict.fromkeys(reasons)),
-        diagnostics,
+        filter_result=result,
+        window_rows=window_rows,
+        physical=physical,
+        reasons=list(dict.fromkeys(reasons)),
+        diagnostics=diagnostics,
     )

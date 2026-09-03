@@ -52,12 +52,6 @@ class StateSpaceModel(Protocol):
 
         ...
 
-    def inflow_to_flow_rate(self, inflow_rate: float) -> float:
-        """Convert an inflow value to the model's flow-rate units."""
-
-        ...
-
-
 @dataclass(frozen=True)
 class ReservoirStateSpaceModel:
     """Estimate storage, inflow, and actual outflow together.
@@ -165,8 +159,3 @@ class ReservoirStateSpaceModel:
         """Use the first finite outflow reading to seed the true outflow state."""
 
         return self.unit_system.validate_flow_rate(first_discharge_rate)
-
-    def inflow_to_flow_rate(self, inflow_rate: float) -> float:
-        """Return an inflow rate in the configured flow-rate units."""
-
-        return self.unit_system.validate_flow_rate(inflow_rate)

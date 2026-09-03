@@ -92,6 +92,10 @@ def _elapsed_lag_autocorrelation(
         (lag_tolerance or timedelta(seconds=max(cadence * 0.25, 1.0))).total_seconds()
     )
     targets = np.arange(cadence, limit + cadence * 0.5, cadence)
+    if not len(targets):
+        return pd.DataFrame(
+            columns=["lag_seconds", "autocorrelation", "pair_count"]
+        )
     finite_values = series[finite]
     centre = float(np.mean(finite_values))
     variance = float(np.sum((finite_values - centre) ** 2))
@@ -228,7 +232,8 @@ def _aggregate_arrays(
     joint_mask = eligible_mask & np.isfinite(diagnostics["joint_nlpd"])
 
     def mean_metric(key: str) -> float:
-        values = diagnostics[key][primary_mask]
+        values = diagnostics[key][eligible_mask]
+        values = values[np.isfinite(values)]
         return float(np.mean(values)) if len(values) else np.nan
 
     joint_components = diagnostics["joint_components"][joint_mask]
@@ -255,7 +260,7 @@ def _aggregate_arrays(
         "outflow_bias": mean_metric("outflow_z"),
         "conditional_storage_bias": mean_metric("conditional_storage_z"),
         "coverage": float(np.sum(primary_mask) / max(1, np.sum(eligible_mask))),
-        "regularization_count": int(np.sum(diagnostics["jitter"][primary_mask] > 0)),
+        "regularization_count": int(np.sum(diagnostics["jitter"][joint_mask] > 0)),
     }
 
 
@@ -292,6 +297,8 @@ def _physical_metrics_arrays(
             diagnostics[key][indices],
             settings.innovation_max_lag,
         )
+        if frame.empty:
+            return np.nan, np.nan
         finite_frame = frame[np.isfinite(frame["autocorrelation"])]
         if finite_frame.empty:
             return np.nan, np.nan

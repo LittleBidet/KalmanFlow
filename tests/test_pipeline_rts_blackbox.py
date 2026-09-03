@@ -307,6 +307,23 @@ class TestPipelineWindowBoundaries:
                 max_window_steps=invalid_size,
             )
 
+    def test_pipeline_and_smoother_window_limits_must_match(self) -> None:
+        model = ReservoirStateSpaceModel(q_continuous=Q)
+        backend = ReservoirBackend(
+            model=model,
+            initial_covariance=P0,
+            observation_covariance=R,
+        )
+        with pytest.raises(ValueError, match="must match smoother"):
+            OnlineInflowPipeline(
+                backend=backend,
+                smoother=OnlineFixedLagRTS(
+                    timedelta(minutes=30),
+                    max_window_steps=3,
+                ),
+                max_window_steps=2,
+            )
+
     def test_window_overflow_raises_without_advancing(self) -> None:
         start = datetime(2024, 1, 1, tzinfo=UTC)
         pipeline = _reservoir_pipeline(

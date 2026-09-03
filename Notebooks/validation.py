@@ -506,12 +506,12 @@ def storage_closure_metrics(
 ) -> dict[str, float | int]:
     """Return one-step storage-closure errors for one inflow estimate.
 
-    For each adjacent regular interval, the predicted storage change is
-    ``(estimate[t] - outflow[t]) * duration`` and is compared with
-    ``storage[t] - storage[t - 1]``.  The returned residual is predicted
-    change minus observed storage change.  Coverage is valid one-step pairs
-    divided by all possible adjacent steps.  Missing values are handled
-    pairwise and are not interpolated.
+    For each adjacent regular interval, the predicted storage change uses the
+    interval-start rates: ``(estimate[t - 1] - outflow[t - 1]) * duration``.
+    It is compared with ``storage[t] - storage[t - 1]``.  The returned residual
+    is predicted change minus observed storage change.  Coverage is valid
+    one-step pairs divided by all possible adjacent steps.  Missing values are
+    handled pairwise and are not interpolated.
     """
 
     factor = float(flow_to_volume_per_second)
@@ -537,7 +537,7 @@ def storage_closure_metrics(
 
     observed_change = storage_values[1:] - storage_values[:-1]
     predicted_change = (
-        estimate_values[1:] - outflow_values[1:]
+        estimate_values[:-1] - outflow_values[:-1]
     ) * elapsed[1:] * factor
     valid = (
         np.isfinite(observed_change)

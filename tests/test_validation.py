@@ -146,7 +146,7 @@ def test_validation_frame_uses_a_centered_rolling_mean() -> None:
 
 def test_storage_closure_is_perfect_for_a_known_water_balance() -> None:
     result = storage_closure_metrics(
-        [1.0, 1.0 + 1.0 / 3600.0, 1.0 + 2.0 / 3600.0],
+        [1.0 + 1.0 / 3600.0, 1.0 + 2.0 / 3600.0, 999.0],
         [0.0, 1.0, 3.0],
         [1.0, 1.0, 1.0],
         flow_to_volume_per_second=1.0,
@@ -160,6 +160,20 @@ def test_storage_closure_is_perfect_for_a_known_water_balance() -> None:
     assert result["rmse_cfs"] == pytest.approx(0.0)
     assert result["mae_cfs"] == pytest.approx(0.0)
     assert result["bias_cfs"] == pytest.approx(0.0)
+
+
+def test_storage_closure_uses_interval_start_rates() -> None:
+    index = _hourly_index(3)
+    result = storage_closure_metrics(
+        pd.Series([2.0, 10.0, 999.0], index=index),
+        pd.Series([0.0, 3600.0, 28_800.0], index=index),
+        pd.Series([1.0, 3.0, 999.0], index=index),
+        flow_to_volume_per_second=1.0,
+    )
+
+    assert result["paired_observations"] == 2
+    assert result["rmse"] == pytest.approx(0.0)
+    assert result["bias"] == pytest.approx(0.0)
 
 
 def test_inflow_behavior_reports_frequency_severity_and_hourly_change() -> None:

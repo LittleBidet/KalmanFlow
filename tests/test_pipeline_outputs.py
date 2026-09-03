@@ -43,6 +43,10 @@ class FakeFixedLagSmoother:
         self.steps: list[FakeFilterStep] = []
 
     @property
+    def max_window_steps(self):
+        return 100_000
+
+    @property
     def pending_count(self):
         return len(self.steps)
 

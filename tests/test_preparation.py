@@ -57,3 +57,35 @@ def test_missing_spillway_file_preserves_outlet_only_behavior(tmp_path: Path) ->
     assert prepared.window_audit.loc[0, "outflow_definition"] == (
         "downstream discharge only; spillway unavailable in requested data"
     )
+
+
+def test_backward_alignment_is_causal_and_honors_tolerance_boundary(
+    tmp_path: Path,
+) -> None:
+    clock = pd.DatetimeIndex(
+        ["2025-01-01 00:20Z", "2025-01-01 00:40Z", "2025-01-01 01:00Z"]
+    )
+    outlet_index = pd.DatetimeIndex(
+        ["2025-01-01 00:00Z", "2025-01-01 00:00Z", "2025-01-01 00:20:01Z"]
+    )
+    _write_source(tmp_path / "storage.csv", clock, [100, 101, 102])
+    _write_source(tmp_path / "outlet.csv", outlet_index, [1.0, 1.5, 2.0])
+    _write_source(tmp_path / "upstream.csv", clock, [4.0, 4.0, 4.0])
+
+    prepared = prepare_reservoir_data(
+        ReservoirSources(
+            storage=tmp_path / "storage.csv",
+            outlet=tmp_path / "outlet.csv",
+            upstream=tmp_path / "upstream.csv",
+            spillway=None,
+            combine_spillway=False,
+        ),
+        start=clock[0],
+        end=clock[-1],
+        asof_tolerance="20min",
+    )
+
+    assert prepared.observations.loc[clock[0], "outflow"] == 1.5
+    assert prepared.observations.loc[clock[1], "outflow"] == 2.0
+    assert np.isnan(prepared.observations.loc[clock[2], "outflow"])
+    assert prepared.source_audit.loc["outlet", "duplicates_removed"] == 1

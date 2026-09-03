@@ -99,14 +99,14 @@ class TestTimeVaryingMatrixPartitions:
         )
         assert result.transition_matrices.shape == (2, 1, 1)
 
-    def test_transition_matrix_accepts_n_times_length(self) -> None:
-        result = _scalar_filter(
-            observations=np.array([1.0, 2.0, 3.0]),
-            transition_matrix=np.stack(
-                [np.array([[1.0]]), np.array([[1.0]]), np.array([[1.0]])]
-            ),
-        )
-        assert result.transition_matrices.shape == (2, 1, 1)
+    def test_transition_matrix_rejects_unused_n_times_length(self) -> None:
+        with pytest.raises(ValueError, match="transition_matrix must have shape"):
+            _scalar_filter(
+                observations=np.array([1.0, 2.0, 3.0]),
+                transition_matrix=np.stack(
+                    [np.array([[1.0]]), np.array([[1.0]]), np.array([[1.0]])]
+                ),
+            )
 
     def test_transition_matrix_rejects_invalid_length(self) -> None:
         with pytest.raises(ValueError, match="transition_matrix must have shape"):
@@ -167,6 +167,18 @@ class TestControlPartitions:
             _scalar_filter(
                 observations=np.array([1.0, 2.0, 3.0]),
                 control_offsets=np.array([[0.5]]),
+            )
+
+    def test_single_step_still_validates_dynamics_and_control_pairing(self) -> None:
+        with pytest.raises(ValueError, match="transition_matrix must have shape"):
+            _scalar_filter(
+                observations=np.array([1.0]),
+                transition_matrix=np.ones((7, 2, 3)),
+            )
+        with pytest.raises(ValueError, match="must be supplied together"):
+            _scalar_filter(
+                observations=np.array([1.0]),
+                control_matrix=np.array([[1.0]]),
             )
 
 

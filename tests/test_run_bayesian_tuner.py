@@ -23,6 +23,24 @@ def test_split_validation_windows_reject_short_or_naive_indexes() -> None:
         )
 
 
+def test_window_capacity_uses_second_finite_storage_for_warmup() -> None:
+    index = pd.date_range("2025-01-01", periods=144, freq="h", tz="UTC")
+    storage = np.arange(144.0)
+    storage[1:20] = np.nan
+    observations = pd.DataFrame(
+        {"storage": storage, "outflow": 4.0},
+        index=index,
+    )
+    windows = run_bayesian_tuner.split_validation_windows(index)
+
+    with pytest.raises(ValueError, match="validation-1 has 4"):
+        run_bayesian_tuner._validate_window_capacity(
+            observations,
+            windows,
+            run_bayesian_tuner.build_evaluation_settings(),
+        )
+
+
 def test_runner_rejects_invalid_dates_before_loading_data(tmp_path) -> None:
     with pytest.raises(ValueError, match="DATA_START must be timezone-aware"):
         run_bayesian_tuner.run_bayesian_tuner(

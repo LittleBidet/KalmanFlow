@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -90,14 +91,21 @@ class OnlineReservoirInflow:
         :meth:`from_config`.
         """
 
-        self._pipeline = _build_default_pipeline(
+        backend = _build_default_backend(
             q_storage=q_storage,
             q_inflow=q_inflow,
             q_outflow=q_outflow,
             r_storage=r_storage,
             r_outflow=r_outflow,
+        )
+        self._pipeline = _build_pipeline(
+            backend,
             smoothing_lag=smoothing_lag,
             max_window_steps=max_window_steps,
+        )
+        self._configuration_fingerprint = _configuration_fingerprint(
+            backend,
+            smoothing_lag,
         )
         self._reservoir_id = reservoir_id
         self._processing = False
@@ -113,9 +121,15 @@ class OnlineReservoirInflow:
         """Create an estimator from a validated reservoir configuration."""
 
         instance = cls.__new__(cls)
-        instance._pipeline = _build_configured_pipeline(
-            config,
+        backend = _build_configured_backend(config)
+        instance._pipeline = _build_pipeline(
+            backend,
+            smoothing_lag=config.smoothing_lag,
             max_window_steps=max_window_steps,
+        )
+        instance._configuration_fingerprint = _configuration_fingerprint(
+            backend,
+            config.smoothing_lag,
         )
         instance._reservoir_id = config.reservoir_id
         instance._processing = False
@@ -132,9 +146,8 @@ class OnlineReservoirInflow:
     ) -> OnlineReservoirInflow:
         """Restore one reservoir stream from a checkpoint.
 
-        Checkpoints deliberately contain no configuration fingerprint. The
-        supplied configuration must therefore be compatible with the stream;
-        only its reservoir identifier is checked here.
+        The supplied configuration must match both the reservoir identifier
+        and the model settings recorded by the checkpoint fingerprint.
         """
 
         decoded = decode_reservoir_checkpoint(checkpoint)
@@ -143,6 +156,11 @@ class OnlineReservoirInflow:
                 "checkpoint reservoir_id does not match config.reservoir_id"
             )
         instance = cls.from_config(config, max_window_steps=max_window_steps)
+        if (
+            decoded.configuration_fingerprint
+            != instance._configuration_fingerprint
+        ):
+            raise ValueError("checkpoint configuration does not match config")
         instance._pipeline.restore_state(decoded.pipeline_state)
         return instance
 
@@ -229,6 +247,7 @@ class OnlineReservoirInflow:
             )
         return encode_reservoir_checkpoint(
             self._reservoir_id,
+            self._configuration_fingerprint,
             self._pipeline.export_state(),
         )
 
@@ -472,46 +491,6 @@ def get_reservoir_inflow_from_config(
     )
 
 
-def _build_default_pipeline(
-    *,
-    q_storage: float,
-    q_inflow: float,
-    q_outflow: float,
-    r_storage: float,
-    r_outflow: float,
-    smoothing_lag: timedelta,
-    max_window_steps: int,
-) -> OnlineInflowPipeline:
-    """Build the standard reservoir model and streaming pipeline."""
-
-    backend = _build_default_backend(
-        q_storage=q_storage,
-        q_inflow=q_inflow,
-        q_outflow=q_outflow,
-        r_storage=r_storage,
-        r_outflow=r_outflow,
-    )
-    return _build_pipeline(
-        backend,
-        smoothing_lag=smoothing_lag,
-        max_window_steps=max_window_steps,
-    )
-
-
-def _build_configured_pipeline(
-    config: ReservoirConfig,
-    *,
-    max_window_steps: int,
-) -> OnlineInflowPipeline:
-    """Build a streaming pipeline without discarding validated config fields."""
-
-    return _build_pipeline(
-        _build_configured_backend(config),
-        smoothing_lag=config.smoothing_lag,
-        max_window_steps=max_window_steps,
-    )
-
-
 def _build_default_backend(
     *,
     q_storage: float,
@@ -544,6 +523,44 @@ def _build_configured_backend(config: ReservoirConfig) -> ReservoirBackend:
     )
 
 
+def _configuration_fingerprint(
+    backend: ReservoirBackend,
+    smoothing_lag: timedelta,
+) -> bytes:
+    """Hash the model settings that determine checkpoint replay semantics."""
+
+    model = backend.model
+    if not isinstance(model, ReservoirStateSpaceModel):
+        raise TypeError("reservoir checkpointing requires ReservoirStateSpaceModel")
+    digest = hashlib.sha256(b"kalmone-reservoir-state-space-v1")
+    for array in (
+        model.q_continuous,
+        backend.initial_covariance,
+        backend.observation_covariance,
+        model.observation_matrix,
+    ):
+        values = np.asarray(array, dtype=">f8")
+        digest.update(np.asarray(values.shape, dtype=">u4").tobytes())
+        digest.update(values.tobytes(order="C"))
+    digest.update(
+        np.asarray(
+            [
+                smoothing_lag.total_seconds(),
+                model.unit_system.flow_to_volume_per_second,
+            ],
+            dtype=">f8",
+        ).tobytes()
+    )
+    for label in (
+        model.unit_system.volume_label,
+        model.unit_system.flow_label,
+    ):
+        encoded = label.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    return digest.digest()
+
+
 def _build_pipeline(
     backend: ReservoirBackend,
     *,
@@ -558,7 +575,6 @@ def _build_pipeline(
             smoothing_lag,
             max_window_steps=max_window_steps,
         ),
-        max_window_steps=max_window_steps,
     )
 
 

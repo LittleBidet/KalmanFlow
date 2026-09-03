@@ -79,6 +79,10 @@ class PipelineSmoother(Protocol[FilterStep, SmoothedState]):
     """Smoother that releases estimates after a chosen delay."""
 
     @property
+    def max_window_steps(self) -> int:
+        """Maximum number of active forward-filter steps."""
+
+    @property
     def pending_count(self) -> int:
         """Number of active, not finalized filter steps."""
 
@@ -134,17 +138,27 @@ class OnlineInflowPipeline:
         backend: PipelineBackend[FilterStep],
         smoother: PipelineSmoother[FilterStep, SmoothedState],
         *,
-        max_window_steps: int = 100_000,
+        max_window_steps: int | None = None,
     ) -> None:
         """Create a pipeline with a model backend and a smoothing component."""
 
         self.backend = backend
         self._smoother = smoother
-        self.max_window_steps = bounded_integer(
-            max_window_steps,
-            name="max_window_steps",
+        smoother_limit = bounded_integer(
+            smoother.max_window_steps,
+            name="smoother.max_window_steps",
             minimum=2,
         )
+        if max_window_steps is not None:
+            requested_limit = bounded_integer(
+                max_window_steps,
+                name="max_window_steps",
+                minimum=2,
+            )
+            if requested_limit != smoother_limit:
+                raise ValueError(
+                    "max_window_steps must match smoother.max_window_steps"
+                )
         self._initial_observation: InitializationObservation | None = None
         self._last_input_timestamp: datetime | None = None
         self._last_filter_step: FilterStep | None = None
@@ -163,6 +177,12 @@ class OnlineInflowPipeline:
         """Number of active states waiting for the smoothing lag."""
 
         return self._smoother.pending_count
+
+    @property
+    def max_window_steps(self) -> int:
+        """Maximum active-window size enforced by the smoother."""
+
+        return int(self._smoother.max_window_steps)
 
     @property
     def latest_filter_step(self) -> FilterStep | None:
@@ -434,7 +454,6 @@ class OnlineInflowPipeline:
             storage=storage,
             discharge=discharge,
         )
-        self._check_window_capacity(required_steps=2)
         steps = self.backend.initialize(first, second)
         if len(steps) != 2:
             raise ValueError("backend.initialize must return exactly two filter steps")
@@ -449,14 +468,6 @@ class OnlineInflowPipeline:
             smoothed_states=tuple(finalized),
             filtered_states=steps,
         )
-
-    def _check_window_capacity(self, *, required_steps: int = 1) -> None:
-        """Raise an error if adding steps would exceed the active window."""
-
-        if self.pending_count + required_steps > self.max_window_steps:
-            raise OverflowError(
-                "Smoothing window reached max_window_steps before a state finalized"
-            )
 
     def _add_step(
         self,

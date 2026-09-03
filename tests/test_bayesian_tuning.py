@@ -500,6 +500,58 @@ def test_joint_nlpd_is_aggregated_per_observed_component() -> None:
     assert row["joint_nlpd"] == pytest.approx((2.0 + 4.0) / 3.0)
 
 
+def test_window_metrics_use_their_own_finite_observations() -> None:
+    index = pd.date_range("2025-01-01", periods=3, freq="h", tz="UTC")
+    diagnostics = {
+        "primary_nlpd": np.array([1.0, 1.0, np.nan]),
+        "joint_nlpd": np.ones(3),
+        "joint_nis": np.ones(3),
+        "joint_components": np.array([2.0, 1.0, 1.0]),
+        "storage_nis": np.array([1.0, 2.0, np.nan]),
+        "outflow_nis": np.array([3.0, np.nan, 5.0]),
+        "conditional_storage_nis": np.array([4.0, np.nan, np.nan]),
+        "storage_z": np.array([1.0, 2.0, np.nan]),
+        "outflow_z": np.array([3.0, np.nan, 5.0]),
+        "conditional_storage_z": np.array([4.0, np.nan, np.nan]),
+        "jitter": np.zeros(3),
+    }
+    row = _aggregate_arrays(
+        diagnostics,
+        np.ones(3, dtype=bool),
+        ValidationWindow("window", index[0], index[-1] + pd.Timedelta(hours=1)),
+        np.ones(3, dtype=bool),
+    )
+
+    assert row["storage_nis"] == pytest.approx(1.5)
+    assert row["outflow_nis"] == pytest.approx(4.0)
+    assert row["conditional_storage_nis"] == pytest.approx(4.0)
+
+
+def test_short_positive_autocorrelation_lag_returns_empty_diagnostic() -> None:
+    storage, discharge, windows = _inputs()
+    result = evaluate_configuration(
+        storage,
+        discharge,
+        _config(),
+        evaluation_window=windows[0],
+        settings=BayesianEvaluationSettings(
+            warmup=timedelta(0),
+            innovation_max_lag=timedelta(minutes=30),
+        ),
+    )
+
+    assert np.isnan(
+        result.candidate_summary.loc[
+            0, "max_material_elapsed_lag_autocorrelation"
+        ]
+    )
+
+
+def test_zero_autocorrelation_lag_is_rejected_at_settings_boundary() -> None:
+    with pytest.raises(ValueError, match="innovation_max_lag must be a positive"):
+        BayesianEvaluationSettings(innovation_max_lag=timedelta(0))
+
+
 def test_result_exposes_competitive_trial_ids() -> None:
     storage, discharge, windows = _inputs()
     settings, search = _settings()
@@ -751,7 +803,13 @@ def test_irregular_process_covariance_matches_model_conversion() -> None:
     direct_q = np.asarray(prepared.model.q_continuous).copy()
     direct_q[1, 1] = q_inflow
     direct_model = type(prepared.model)(direct_q, prepared.model.unit_system)
-    for row, elapsed in enumerate(prepared.elapsed_seconds):
+    elapsed_seconds = np.asarray(
+        [
+            (prepared.timestamps[row] - prepared.timestamps[row - 1]).total_seconds()
+            for row in range(1, len(prepared.timestamps))
+        ]
+    )
+    for row, elapsed in enumerate(elapsed_seconds):
         np.testing.assert_allclose(
             cached[row], direct_model.process_covariance(elapsed)
         )

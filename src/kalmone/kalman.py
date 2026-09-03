@@ -112,6 +112,37 @@ def kalman_filter(
     _require_shape(p0, (n_state, n_state), "initial_covariance")
 
     n_transitions = max(n_times - 1, 0)
+    transitions = _transition_array(
+        transition_matrix,
+        n_transitions,
+        (n_state, n_state),
+        "transition_matrix",
+    )
+    process_covariances = _transition_array(
+        process_covariance,
+        n_transitions,
+        (n_state, n_state),
+        "process_covariance",
+    )
+    observation_matrices = _observation_array(
+        observation_matrix,
+        n_times,
+        (n_obs, n_state),
+        "observation_matrix",
+    )
+    observation_covariances = _observation_array(
+        observation_covariance,
+        n_times,
+        (n_obs, n_obs),
+        "observation_covariance",
+    )
+    offsets = _control_offset_array(control_offsets, n_transitions, n_state)
+    control_matrices, control_values = _matrix_control_arrays(
+        control_matrix,
+        controls,
+        n_transitions,
+        n_state,
+    )
     filtered_means = np.empty((n_times, n_state), dtype=float)
     filtered_covariances = np.empty((n_times, n_state, n_state), dtype=float)
     predicted_means = np.empty((n_times, n_state), dtype=float)
@@ -128,24 +159,12 @@ def kalman_filter(
     for k in range(n_times):
         if k > 0:
             step = k - 1
-            f = _transition_at(
-                transition_matrix,
-                step,
-                n_transitions,
-                (n_state, n_state),
-                "transition_matrix",
-            )
-            q = _transition_at(
-                process_covariance,
-                step,
-                n_transitions,
-                (n_state, n_state),
-                "process_covariance",
-            )
+            f = _transition_at(transitions, step)
+            q = _transition_at(process_covariances, step)
             transition_matrices[step] = f
-            offset = _control_offset_at(control_offsets, step, n_transitions, n_state)
+            offset = _control_offset_at(offsets, step, n_state)
             offset = offset + _matrix_control_at(
-                control_matrix, controls, step, n_transitions, n_state
+                control_matrices, control_values, step, n_state
             )
             predicted_means[k], predicted_covariances[k] = predict_state(
                 filtered_means[k - 1],
@@ -155,16 +174,8 @@ def kalman_filter(
                 control_offset=offset,
             )
 
-        h = _observation_at(
-            observation_matrix, k, n_times, (n_obs, n_state), "observation_matrix"
-        )
-        r = _observation_at(
-            observation_covariance,
-            k,
-            n_times,
-            (n_obs, n_obs),
-            "observation_covariance",
-        )
+        h = _observation_at(observation_matrices, k)
+        r = _observation_at(observation_covariances, k)
 
         (
             filtered_means[k],
@@ -378,138 +389,150 @@ def _as_observation_array(observations: np.ndarray) -> np.ndarray:
     raise ValueError("observations must be one- or two-dimensional")
 
 
-def _transition_at(
+def _transition_array(
     value: np.ndarray,
-    step: int,
     n_transitions: int,
     expected_shape: tuple[int, int],
     name: str,
 ) -> np.ndarray:
-    """Return the transition-like matrix for one step."""
+    """Normalize and validate a shared or per-transition matrix."""
 
     array = np.asarray(value, dtype=float)
     if array.ndim == 2:
         _require_shape(array, expected_shape, name)
         return array
-    if array.ndim == 3 and array.shape[0] in {n_transitions, n_transitions + 1}:
-        matrix = array[step]
-        _require_shape(matrix, expected_shape, name)
-        return matrix
+    per_transition_shape = (n_transitions, *expected_shape)
+    if array.shape == per_transition_shape:
+        return array
     raise ValueError(
         f"{name} must have shape {expected_shape}, "
-        f"({n_transitions}, {expected_shape[0]}, {expected_shape[1]}), "
-        f"or ({n_transitions + 1}, {expected_shape[0]}, {expected_shape[1]})"
+        f"or {per_transition_shape}"
     )
 
 
-def _observation_at(
+def _transition_at(value: np.ndarray, step: int) -> np.ndarray:
+    """Return the shared or selected per-transition matrix."""
+
+    return value if value.ndim == 2 else value[step]
+
+
+def _observation_array(
     value: np.ndarray,
-    time_index: int,
     n_times: int,
     expected_shape: tuple[int, int],
     name: str,
 ) -> np.ndarray:
-    """Return the observation matrix for one timestamp."""
+    """Normalize and validate a shared or per-observation matrix."""
 
     array = np.asarray(value, dtype=float)
     if array.ndim == 2:
         _require_shape(array, expected_shape, name)
         return array
-    if array.ndim == 3 and array.shape[0] == n_times:
-        matrix = array[time_index]
-        _require_shape(matrix, expected_shape, name)
-        return matrix
+    per_observation_shape = (n_times, *expected_shape)
+    if array.shape == per_observation_shape:
+        return array
     raise ValueError(
         f"{name} must have shape {expected_shape} or "
-        f"({n_times}, {expected_shape[0]}, {expected_shape[1]})"
+        f"{per_observation_shape}"
+    )
+
+
+def _observation_at(value: np.ndarray, time_index: int) -> np.ndarray:
+    """Return the shared or selected per-observation matrix."""
+
+    return value if value.ndim == 2 else value[time_index]
+
+
+def _control_offset_array(
+    control_offsets: np.ndarray | None,
+    n_transitions: int,
+    n_state: int,
+) -> np.ndarray | None:
+    """Normalize and validate shared or per-transition control offsets."""
+
+    if control_offsets is None:
+        return None
+
+    offsets = np.asarray(control_offsets, dtype=float)
+    if offsets.ndim == 1:
+        _require_shape(offsets, (n_state,), "control_offsets")
+        return offsets
+    per_transition_shape = (n_transitions, n_state)
+    if offsets.shape == per_transition_shape:
+        return offsets
+    raise ValueError(
+        "control_offsets must have shape "
+        f"({n_state},) or {per_transition_shape}"
     )
 
 
 def _control_offset_at(
     control_offsets: np.ndarray | None,
     step: int,
-    n_transitions: int,
     n_state: int,
 ) -> np.ndarray:
-    """Return the fixed or per-step control offset for one transition."""
+    """Return the shared or selected control offset."""
 
     if control_offsets is None:
         return np.zeros(n_state, dtype=float)
+    return control_offsets if control_offsets.ndim == 1 else control_offsets[step]
 
-    offsets = np.asarray(control_offsets, dtype=float)
-    if offsets.ndim == 1:
-        _require_shape(offsets, (n_state,), "control_offsets")
-        return offsets
-    if offsets.ndim == 2 and offsets.shape[0] in {n_transitions, n_transitions + 1}:
-        offset = offsets[step]
-        _require_shape(offset, (n_state,), "control_offsets")
-        return offset
-    raise ValueError(
-        "control_offsets must have shape "
-        f"({n_state},), ({n_transitions}, {n_state}), or "
-        f"({n_transitions + 1}, {n_state})"
-    )
+
+def _matrix_control_arrays(
+    control_matrix: np.ndarray | None,
+    controls: np.ndarray | None,
+    n_transitions: int,
+    n_state: int,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Normalize and validate matrix-control inputs."""
+
+    if control_matrix is None and controls is None:
+        return None, None
+    if control_matrix is None or controls is None:
+        raise ValueError("control_matrix and controls must be supplied together")
+
+    u = np.asarray(controls, dtype=float)
+    b = np.asarray(control_matrix, dtype=float)
+    if b.ndim == 2 and b.shape[0] == n_state:
+        n_control = b.shape[1]
+    elif b.ndim == 3 and b.shape[:2] == (n_transitions, n_state):
+        n_control = b.shape[2]
+    else:
+        raise ValueError(
+            "control_matrix must have shape (n_state, n_control) or "
+            "(n_transitions, n_state, n_control)"
+        )
+
+    if u.ndim == 1:
+        if u.shape[0] == n_transitions and n_control == 1:
+            u = u.reshape(n_transitions, 1)
+        elif u.shape != (n_control,):
+            raise ValueError(
+                "controls must have shape (n_control,) or "
+                "(n_transitions, n_control)"
+            )
+    elif u.shape != (n_transitions, n_control):
+        raise ValueError(
+            "controls must have shape (n_control,) or "
+            "(n_transitions, n_control)"
+        )
+
+    return b, u
 
 
 def _matrix_control_at(
     control_matrix: np.ndarray | None,
     controls: np.ndarray | None,
     step: int,
-    n_transitions: int,
     n_state: int,
 ) -> np.ndarray:
     """Return the state change caused by a control input."""
 
-    if control_matrix is None and controls is None:
-        return np.zeros(n_state, dtype=float)
     if control_matrix is None or controls is None:
-        raise ValueError("control_matrix and controls must be supplied together")
-
-    u = np.asarray(controls, dtype=float)
-    b = np.asarray(control_matrix, dtype=float)
-    if u.ndim == 1:
-        if (
-            u.shape[0] in {n_transitions, n_transitions + 1}
-            and _control_dimension(b, n_transitions) == 1
-        ):
-            control = np.array([u[step]], dtype=float)
-        else:
-            control = u
-    elif u.ndim == 2 and u.shape[0] in {n_transitions, n_transitions + 1}:
-        control = u[step]
-    else:
-        raise ValueError(
-            "controls must have shape (n_control,), "
-            f"({n_transitions}, n_control), or ({n_transitions + 1}, n_control)"
-        )
-
-    expected_shape = (n_state, control.shape[0])
-    if b.ndim == 2:
-        _require_shape(b, expected_shape, "control_matrix")
-        return b @ control
-    if b.ndim == 3 and b.shape[0] in {n_transitions, n_transitions + 1}:
-        matrix = b[step]
-        _require_shape(matrix, expected_shape, "control_matrix")
-        return matrix @ control
-    raise ValueError(
-        "control_matrix must have shape "
-        f"{expected_shape}, "
-        f"({n_transitions}, {expected_shape[0]}, {expected_shape[1]}), "
-        f"or ({n_transitions + 1}, {expected_shape[0]}, {expected_shape[1]})"
-    )
-
-
-def _control_dimension(control_matrix: np.ndarray, n_transitions: int) -> int | None:
-    """Return the number of inputs described by a control matrix."""
-
-    if control_matrix.ndim == 2:
-        return control_matrix.shape[1]
-    if control_matrix.ndim == 3 and control_matrix.shape[0] in {
-        n_transitions,
-        n_transitions + 1,
-    }:
-        return control_matrix.shape[2]
-    return None
+        return np.zeros(n_state, dtype=float)
+    matrix = control_matrix if control_matrix.ndim == 2 else control_matrix[step]
+    control = controls if controls.ndim == 1 else controls[step]
+    return matrix @ control
 
 
 def _require_shape(

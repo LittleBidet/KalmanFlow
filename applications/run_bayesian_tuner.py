@@ -131,9 +131,17 @@ def _validate_window_capacity(
 ) -> None:
     index = observations.index
     storage = observations["storage"].to_numpy(dtype=float, copy=False)
-    warmup_end = index[1] + pd.Timedelta(seconds=settings.warmup.total_seconds())
+    finite_storage = np.flatnonzero(np.isfinite(storage))
+    if len(finite_storage) < 2:
+        raise ValueError("at least two finite storage observations are required")
+    second_storage = int(finite_storage[1])
+    warmup_end = index[second_storage] + pd.Timedelta(
+        seconds=settings.warmup.total_seconds()
+    )
     scoreable = (
-        (np.arange(len(index)) >= 2) & (index >= warmup_end) & np.isfinite(storage)
+        (np.arange(len(index)) > second_storage)
+        & (index >= warmup_end)
+        & np.isfinite(storage)
     )
     counts = [
         int(np.count_nonzero(scoreable & window.mask(index))) for window in windows

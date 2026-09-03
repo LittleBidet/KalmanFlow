@@ -15,7 +15,9 @@ from kalmone import (
     ReservoirStateSpaceModel,
     UnitSystem,
     get_reservoir_inflow,
+    get_reservoir_inflow_from_config,
     initial_filter_step,
+    kalman_filter,
     kalman_step,
     smooth_filter_steps,
 )
@@ -113,10 +115,6 @@ def test_reservoir_model_scales_time_process_noise_and_flow_units() -> None:
     npt.assert_allclose(
         model.initial_inflow(100.0, 101.0, 4.0, 900.0),
         1.0 / (900.0 / 43560.0) + 4.0,
-    )
-    npt.assert_allclose(
-        model.inflow_to_flow_rate(1.0),
-        1.0,
     )
     assert model.initial_outflow(4.0) == pytest.approx(4.0)
 
@@ -386,3 +384,167 @@ def test_batch_kernel_matches_streaming_for_irregular_missing_data() -> None:
             assert actual_values[present].tolist() == values[present].tolist()
         else:
             npt.assert_allclose(actual[column], values, equal_nan=True)
+
+
+@pytest.mark.parametrize("cadence_minutes", [5, 15, 60])
+def test_synthetic_inflow_truth_is_recovered_and_smoothing_reduces_error(
+    cadence_minutes: int,
+) -> None:
+    rng = np.random.default_rng(2026 + cadence_minutes)
+    count = 160
+    elapsed_seconds = cadence_minutes * 60.0
+    index = pd.date_range(
+        "2024-01-01", periods=count, freq=f"{cadence_minutes}min", tz="UTC"
+    )
+    true_inflow = np.empty(count)
+    true_outflow = np.empty(count)
+    true_storage = np.empty(count)
+    true_inflow[0] = 30.0
+    true_outflow[0] = 10.0
+    true_storage[0] = 1_000.0
+    scale = np.sqrt(elapsed_seconds / 900.0)
+    true_inflow[1:] = 30.0 + np.cumsum(rng.normal(0.0, scale, count - 1))
+    true_outflow[1:] = 10.0 + np.cumsum(
+        rng.normal(0.0, 0.25 * scale, count - 1)
+    )
+    units = UnitSystem.us_customary()
+    for position in range(1, count):
+        true_storage[position] = true_storage[position - 1] + units.flow_to_volume(
+            true_inflow[position - 1] - true_outflow[position - 1],
+            elapsed_seconds,
+        )
+
+    measured_storage = true_storage + rng.normal(0.0, 0.05, count)
+    measured_outflow = true_outflow + rng.normal(0.0, 0.25, count)
+    config = _config(
+        q=np.diag([1e-10, 1.0 / 900.0, 0.25**2 / 900.0]),
+        r=np.diag([0.05**2, 0.25**2]),
+        p0=np.diag([0.1, 25.0, 4.0]),
+        smoothing_lag=timedelta(hours=3),
+    )
+
+    result = get_reservoir_inflow_from_config(
+        pd.Series(measured_storage, index=index),
+        pd.Series(measured_outflow, index=index),
+        config,
+    )
+    warmup = 10
+    filtered = result["estimated_inflow"].to_numpy()
+    revised = result["revised_inflow"].to_numpy()
+    filtered_mask = np.arange(count) >= warmup
+    revised_mask = filtered_mask & np.isfinite(revised)
+    filtered_rmse = float(
+        np.sqrt(np.mean((filtered[filtered_mask] - true_inflow[filtered_mask]) ** 2))
+    )
+    revised_rmse = float(
+        np.sqrt(np.mean((revised[revised_mask] - true_inflow[revised_mask]) ** 2))
+    )
+
+    assert filtered_rmse < 3.0
+    assert revised_rmse < filtered_rmse
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_randomized_batch_and_stream_outputs_are_equivalent(seed: int) -> None:
+    rng = np.random.default_rng(seed)
+    count = 40
+    elapsed = rng.integers(1, 7_201, size=count - 1)
+    offsets = np.concatenate(([0], np.cumsum(elapsed)))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    index = pd.DatetimeIndex(
+        [start + timedelta(seconds=int(offset)) for offset in offsets]
+    )
+    storage = 1_000.0 + np.cumsum(rng.normal(0.0, 0.5, count))
+    outflow = 10.0 + rng.normal(0.0, 1.0, count)
+    storage[2:][rng.random(count - 2) < 0.2] = np.nan
+    outflow[2:][rng.random(count - 2) < 0.2] = np.nan
+    kwargs = {
+        "q_storage": float(10 ** rng.uniform(-4.0, -1.0)),
+        "q_inflow": float(10 ** rng.uniform(-4.0, -1.0)),
+        "q_outflow": float(10 ** rng.uniform(-4.0, -1.0)),
+        "r_storage": float(10 ** rng.uniform(-3.0, 0.0)),
+        "r_outflow": float(10 ** rng.uniform(-3.0, 0.0)),
+        "smoothing_lag": timedelta(minutes=int(rng.integers(15, 181))),
+    }
+    batch = get_reservoir_inflow(
+        pd.Series(storage, index=index), pd.Series(outflow, index=index), **kwargs
+    )
+
+    stream = OnlineReservoirInflow(**kwargs)
+    streamed_filtered: dict[datetime, object] = {}
+    streamed_revised: dict[datetime, object] = {}
+    for timestamp, storage_value, outflow_value in zip(
+        index, storage, outflow, strict=True
+    ):
+        update = stream.process(Observation(timestamp, storage_value, outflow_value))
+        for estimate in update.filtered_inflows:
+            assert estimate.timestamp not in streamed_filtered
+            streamed_filtered[estimate.timestamp] = estimate
+        for estimate in update.revised_inflows:
+            assert estimate.timestamp not in streamed_revised
+            streamed_revised[estimate.timestamp] = estimate
+
+    expected_filtered = pd.Series(
+        {timestamp: estimate.value for timestamp, estimate in streamed_filtered.items()}
+    ).reindex(index)
+    expected_revised = pd.Series(
+        {timestamp: estimate.value for timestamp, estimate in streamed_revised.items()}
+    ).reindex(index)
+    npt.assert_allclose(batch["estimated_inflow"], expected_filtered, equal_nan=True)
+    npt.assert_allclose(batch["revised_inflow"], expected_revised, equal_nan=True)
+    assert batch.loc[expected_filtered.notna(), "estimated_inflow_flag"].tolist() == [
+        estimate.prediction_flag.value for estimate in streamed_filtered.values()
+    ]
+    assert batch.loc[expected_revised.notna(), "revised_inflow_flag"].tolist() == [
+        estimate.prediction_flag.value for estimate in streamed_revised.values()
+    ]
+
+
+@pytest.mark.parametrize("elapsed_seconds", [1e-6, 1.0, 31_536_000.0])
+def test_process_covariance_stays_finite_symmetric_and_psd_at_time_extremes(
+    elapsed_seconds: float,
+) -> None:
+    model = ReservoirStateSpaceModel(np.diag([1e-12, 1e-8, 1e-8]))
+    covariance = model.process_covariance(elapsed_seconds)
+    scale = max(1.0, float(np.max(np.abs(covariance))))
+
+    assert np.isfinite(covariance).all()
+    npt.assert_allclose(covariance, covariance.T, rtol=0.0, atol=1e-12 * scale)
+    assert np.min(np.linalg.eigvalsh(covariance)) >= -1e-12 * scale
+
+
+def test_filter_remains_finite_and_psd_across_extreme_time_and_state_scales() -> None:
+    model = ReservoirStateSpaceModel(np.diag([1e-12, 1e-8, 1e-8]))
+    elapsed = np.array([1e-6, 1.0, 86_400.0, 31_536_000.0])
+    result = kalman_filter(
+        observations=np.array(
+            [
+                [1e9, 1e5],
+                [1e9 + 1e-6, 1e5],
+                [1e9 + 1.0, 1e5 + 1.0],
+                [1e9 + 1e4, 1e5 - 100.0],
+                [np.nan, np.nan],
+            ]
+        ),
+        initial_mean=np.array([1e9, 1e5, 1e5]),
+        initial_covariance=np.diag([1e12, 1e8, 1e8]),
+        transition_matrix=np.asarray(
+            [model.transition_matrix(value) for value in elapsed]
+        ),
+        process_covariance=np.asarray(
+            [model.process_covariance(value) for value in elapsed]
+        ),
+        observation_matrix=model.observation_matrix,
+        observation_covariance=np.diag([1e-12, 1e-12]),
+    )
+
+    assert np.isfinite(result.filtered_means).all()
+    assert np.isfinite(result.filtered_covariances).all()
+    assert np.isfinite(result.predicted_covariances).all()
+    assert np.isfinite(result.log_likelihood)
+    for covariance in np.concatenate(
+        (result.filtered_covariances, result.predicted_covariances)
+    ):
+        scale = max(1.0, float(np.max(np.abs(covariance))))
+        npt.assert_allclose(covariance, covariance.T, rtol=0.0, atol=1e-12 * scale)
+        assert np.min(np.linalg.eigvalsh(covariance)) >= -1e-12 * scale

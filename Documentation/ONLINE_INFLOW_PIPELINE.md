@@ -38,7 +38,10 @@ checkpoint = stream.checkpoint()
 restored = OnlineReservoirInflow.from_checkpoint(checkpoint, config=config)
 ```
 
-A checkpoint is bound to one `reservoir_id`; restore rejects a config with a different identifier. The checkpoint contains replay state, not a configuration fingerprint, so callers must use a compatible configuration. Restoration rebuilds the active smoothing window from its retained observations without re-emitting already released records.
+A checkpoint is bound to one `reservoir_id` and a fingerprint of the model,
+covariance, smoothing-lag, and unit settings. Restore rejects a configuration
+that does not match. Restoration rebuilds the active smoothing window from its
+retained observations without re-emitting already released records.
 
 Checkpoints are unavailable during processing, before a successful `process` or
 `process_many` result, after a failed processing call, or for streams created

@@ -18,6 +18,9 @@ increasing, unique, and nonmissing. The base configuration must use diagonal
 diagonal `q`/`r` terms. At least three distinct positive
 `inflow_increment_sd_seeds` and three uniquely named, non-overlapping,
 half-open `ValidationWindow` intervals are required.
+Every supplied seed is evaluated. Consequently, `total_trials` must be at
+least the number of seeds; when `initial_trials` is smaller, the initial design
+is expanded to include them all.
 
 ## Objective and selection
 
@@ -111,20 +114,22 @@ passes the configured gate, selection is restricted to those trials; if none
 passes, the result is returned with an explicit diagnostic-only warning.
 
 The runtime preparation helper is `applications.preparation`. It retains
-`upstream_flow` and spillway audit columns in `PreparedReservoirData`. When a
-spillway file is available, finite spillway values are added to outlet
-discharge. Unknown spillway values remain missing in combined outflow rather
-than being silently treated as zero. If no spillway record exists at all,
-outlet-only outflow is preserved and the output audit states that limitation.
-The application tuner uses this helper; `Notebooks.prepare_reservoir_data`
-is retained only as a compatibility import for existing notebooks.
+`upstream_flow` and spillway audit columns in `PreparedReservoirData`. When the
+requested window contains at least one finite, nonnegative spillway value,
+finite spillway values are added to outlet discharge; missing or negative
+spillway values make combined outflow missing at those timestamps instead of
+being treated as zero. If the spillway file is absent or the requested window
+contains no usable spillway value, outlet-only outflow is preserved and the
+window audit records that limitation. The application tuner uses this helper;
+`Notebooks.prepare_reservoir_data` is retained only as a compatibility import
+for existing notebooks.
 
 ## Application runner
 
 Run the workflow from the project root:
 
 ```bash
-python applications/run_bayesian_tuner.py
+uv run python applications/run_bayesian_tuner.py
 ```
 
 Direct execution uses the reviewed constants near the top of the runner;

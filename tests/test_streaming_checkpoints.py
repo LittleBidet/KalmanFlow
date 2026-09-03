@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import inspect
+import json
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -74,6 +78,27 @@ def _assert_updates_equal(actual, expected) -> None:
                 assert actual_estimate.value == pytest.approx(expected_estimate.value)
 
 
+def _updates_payload(updates) -> list[dict[str, list[list[object]]]]:
+    return [
+        {
+            name: [
+                [
+                    estimate.timestamp.isoformat(),
+                    estimate.value,
+                    estimate.prediction_flag.value,
+                    estimate.smoothing_flag.value,
+                ]
+                for estimate in estimates
+            ]
+            for name, estimates in (
+                ("filtered", update.filtered_inflows),
+                ("revised", update.revised_inflows),
+            )
+        }
+        for update in updates
+    ]
+
+
 def test_restore_after_every_observation_matches_uninterrupted_execution() -> None:
     config = _config()
     observations = _observations()
@@ -90,6 +115,214 @@ def test_restore_after_every_observation_matches_uninterrupted_execution() -> No
         )
 
     _assert_updates_equal(actual, expected)
+
+
+def test_multiple_checkpoint_restarts_match_one_continuous_run() -> None:
+    config = _config()
+    observations = _observations(count=9)
+
+    continuous = OnlineReservoirInflow.from_config(config)
+    expected = tuple(continuous.process(item) for item in observations)
+
+    restarted = OnlineReservoirInflow.from_config(config)
+    actual = []
+    for index, observation in enumerate(observations):
+        actual.append(restarted.process(observation))
+        if index in {1, 4, 6}:
+            restarted = OnlineReservoirInflow.from_checkpoint(
+                restarted.checkpoint(), config=config
+            )
+
+    _assert_updates_equal(actual, expected)
+
+
+def test_checkpoint_survives_a_real_process_restart(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / "reservoir.checkpoint"
+    driver = """
+import json
+import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import numpy as np
+
+from kalmone import (
+    InflowUnits,
+    InitializationStrategy,
+    Observation,
+    OnlineReservoirInflow,
+    ReservoirConfig,
+    UnitSystem,
+)
+
+config = ReservoirConfig(
+    reservoir_id="reservoir-a",
+    reservoir_name="Reservoir A",
+    q=np.diag([0.1, 0.2, 0.3]),
+    r=np.diag([0.25, 0.5]),
+    p0=np.diag([4.0, 9.0, 16.0]),
+    smoothing_lag=timedelta(minutes=30),
+    initialization_strategy=InitializationStrategy.FIRST_TWO_VALID_STORAGE,
+    inflow_units=InflowUnits.CUBIC_FEET_PER_SECOND,
+    model_version="model-v1",
+    configuration_version="config-v1",
+    unit_system=UnitSystem.us_customary(),
+)
+observations = tuple(
+    Observation(
+        datetime(2024, 1, 1, tzinfo=UTC) + timedelta(minutes=15 * index),
+        storage=100.0 + index,
+        discharge=4.0 + 0.1 * index,
+    )
+    for index in range(9)
+)
+path = Path(sys.argv[2])
+if sys.argv[1] == "produce":
+    stream = OnlineReservoirInflow.from_config(config)
+    for observation in observations[:5]:
+        stream.process(observation)
+    path.write_bytes(stream.checkpoint())
+else:
+    stream = OnlineReservoirInflow.from_checkpoint(path.read_bytes(), config=config)
+    updates = [stream.process(observation) for observation in observations[5:]]
+    payload = [
+        {
+            name: [
+                [
+                    estimate.timestamp.isoformat(),
+                    estimate.value,
+                    estimate.prediction_flag.value,
+                    estimate.smoothing_flag.value,
+                ]
+                for estimate in estimates
+            ]
+            for name, estimates in (
+                ("filtered", update.filtered_inflows),
+                ("revised", update.revised_inflows),
+            )
+        }
+        for update in updates
+    ]
+    print(json.dumps(payload))
+"""
+    project_root = Path(__file__).resolve().parents[1]
+    subprocess.run(
+        [sys.executable, "-c", driver, "produce", str(checkpoint_path)],
+        cwd=project_root,
+        check=True,
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", driver, "consume", str(checkpoint_path)],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    continuous = OnlineReservoirInflow.from_config(_config())
+    expected = [continuous.process(item) for item in _observations(count=9)]
+    assert json.loads(completed.stdout) == _updates_payload(expected[5:])
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_randomized_restart_points_match_an_irregular_continuous_run(seed: int) -> None:
+    rng = np.random.default_rng(seed)
+    timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+    observations = []
+    for index in range(30):
+        if index:
+            timestamp += timedelta(minutes=int(rng.integers(1, 46)))
+        storage = 100.0 + float(rng.normal(0.0, 2.0))
+        discharge = 4.0 + float(rng.normal(0.0, 0.5))
+        if index >= 2 and rng.random() < 0.2:
+            storage = float("nan")
+        if index >= 2 and rng.random() < 0.2:
+            discharge = float("nan")
+        observations.append(Observation(timestamp, storage, discharge))
+
+    config = _config(smoothing_lag=timedelta(minutes=45))
+    continuous = OnlineReservoirInflow.from_config(config)
+    expected = [continuous.process(item) for item in observations]
+    restart_points = set(
+        int(value) for value in rng.choice(len(observations) - 1, size=6, replace=False)
+    )
+
+    restarted = OnlineReservoirInflow.from_config(config)
+    actual = []
+    for index, observation in enumerate(observations):
+        actual.append(restarted.process(observation))
+        if index in restart_points:
+            restarted = OnlineReservoirInflow.from_checkpoint(
+                restarted.checkpoint(), config=config
+            )
+
+    _assert_updates_equal(actual, expected)
+
+
+@pytest.mark.parametrize("checkpoint_index", [2, 3, 4])
+def test_restart_before_at_and_after_smoothing_boundary(
+    checkpoint_index: int,
+) -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    offsets = (
+        timedelta(0),
+        timedelta(minutes=15),
+        timedelta(minutes=29, seconds=59),
+        timedelta(minutes=30),
+        timedelta(minutes=30, seconds=1),
+        timedelta(minutes=45),
+    )
+    observations = tuple(
+        Observation(start + offset, 100.0 + index, 4.0 + 0.1 * index)
+        for index, offset in enumerate(offsets)
+    )
+    config = _config(smoothing_lag=timedelta(minutes=30))
+    continuous = OnlineReservoirInflow.from_config(config)
+    expected = [continuous.process(item) for item in observations]
+
+    restarted = OnlineReservoirInflow.from_config(config)
+    actual = []
+    for index, observation in enumerate(observations):
+        actual.append(restarted.process(observation))
+        if index == checkpoint_index:
+            restarted = OnlineReservoirInflow.from_checkpoint(
+                restarted.checkpoint(), config=config
+            )
+
+    _assert_updates_equal(actual, expected)
+    revised_timestamps = [
+        estimate.timestamp
+        for update in actual
+        for estimate in update.revised_inflows
+    ]
+    assert all(
+        start not in [estimate.timestamp for estimate in update.revised_inflows]
+        for update in actual[:3]
+    )
+    assert revised_timestamps.count(start) == 1
+    assert start in [estimate.timestamp for estimate in actual[3].revised_inflows]
+
+
+def test_restored_stream_recovers_after_invalid_input() -> None:
+    config = _config()
+    observations = _observations(count=7)
+    continuous = OnlineReservoirInflow.from_config(config)
+    expected = [continuous.process(item) for item in observations]
+
+    restarted = OnlineReservoirInflow.from_config(config)
+    actual = [restarted.process(item) for item in observations[:3]]
+    restarted = OnlineReservoirInflow.from_checkpoint(
+        restarted.checkpoint(), config=config
+    )
+
+    with pytest.raises(ValueError, match="strictly increasing"):
+        restarted.process(observations[2])
+    with pytest.raises(RuntimeError, match="successful process result"):
+        restarted.checkpoint()
+
+    actual.extend(restarted.process(item) for item in observations[3:])
+    _assert_updates_equal(actual, expected)
+    assert restarted.checkpoint()
 
 
 def test_interleaved_reservoir_streams_stay_isolated() -> None:
@@ -145,6 +378,24 @@ def test_checkpoint_preserves_reservoir_id_and_rejects_mismatch() -> None:
         OnlineReservoirInflow.from_checkpoint(
             checkpoint,
             config=_config(reservoir_id="lake-beta"),
+        )
+
+
+def test_checkpoint_rejects_incompatible_model_settings() -> None:
+    config = _config()
+    stream = OnlineReservoirInflow.from_config(config)
+    stream.process(_observations()[0])
+    checkpoint = stream.checkpoint()
+
+    with pytest.raises(ValueError, match="configuration does not match"):
+        OnlineReservoirInflow.from_checkpoint(
+            checkpoint,
+            config=_config(smoothing_lag=timedelta(hours=2)),
+        )
+    with pytest.raises(ValueError, match="configuration does not match"):
+        OnlineReservoirInflow.from_checkpoint(
+            checkpoint,
+            config=_config(q=np.diag([0.1, 0.25, 0.3])),
         )
 
 

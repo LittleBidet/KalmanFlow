@@ -1,7 +1,7 @@
 # Inflow validation
 
 ```python
-from validation import (
+from Notebooks.validation import (
     ValidationSettings,
     generate_validation_outputs,
 )
@@ -38,9 +38,9 @@ that proxy, not total-inflow accuracy. KGE bias and variability can therefore
 be poor even when timing is correct because the gauge represents only part of
 the contributing flow.
 
-Storage closure remains the stronger internal-consistency check. Its one-step  
-residual is predicted storage change minus observed storage change, using the  
-estimate and outflow at the current regular timestamp. The closure table  
+Storage closure remains the stronger internal-consistency check. Its one-step
+residual is predicted storage change minus observed storage change, using the
+estimate and outflow at the interval-start regular timestamp. The closure table
 reports RMSE, MAE, bias, paired observations, and coverage.
 
 The inflow behavior table reports finite observations and diagnostics that do

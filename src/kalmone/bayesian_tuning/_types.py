@@ -79,10 +79,16 @@ class BayesianEvaluationSettings:
     innovation_bias_warning: float | None = 0.25
 
     def __post_init__(self) -> None:
-        for name in ("warmup", "innovation_max_lag"):
-            value = getattr(self, name)
-            if not isinstance(value, timedelta) or value.total_seconds() < 0.0:
-                raise ValueError(f"{name} must be a nonnegative timedelta")
+        if (
+            not isinstance(self.warmup, timedelta)
+            or self.warmup.total_seconds() < 0.0
+        ):
+            raise ValueError("warmup must be a nonnegative timedelta")
+        if (
+            not isinstance(self.innovation_max_lag, timedelta)
+            or self.innovation_max_lag.total_seconds() <= 0.0
+        ):
+            raise ValueError("innovation_max_lag must be a positive timedelta")
         if int(self.min_scored_storage_observations) < 1:
             raise ValueError("min_scored_storage_observations must be positive")
         practical = float(self.practical_equivalence_tolerance)
@@ -148,10 +154,8 @@ class ConfigEvaluationResult:
 @dataclass(frozen=True)
 class _Prepared:
     index: pd.DatetimeIndex
-    source_positions: np.ndarray
     timestamps: pd.DatetimeIndex
     observations: np.ndarray
-    elapsed_seconds: np.ndarray
     transitions: np.ndarray
     storage_basis: np.ndarray
     inflow_basis: np.ndarray
@@ -162,7 +166,6 @@ class _Prepared:
     q_outflow: float
     r: np.ndarray
     model: ReservoirStateSpaceModel
-    timestamp_seconds: np.ndarray
     finite_observations: np.ndarray
 
 
@@ -174,12 +177,9 @@ class _DiagnosticPlan:
 
 @dataclass
 class _Pass:
-    q_inflow: float
     filter_result: KalmanFilterResult | None
     window_rows: dict[str, dict[str, Any]]
     physical: dict[str, float]
-    regularization_count: int
-    max_jitter: float
     reasons: list[str] = field(default_factory=list)
     diagnostics: dict[str, np.ndarray] = field(default_factory=dict)
 

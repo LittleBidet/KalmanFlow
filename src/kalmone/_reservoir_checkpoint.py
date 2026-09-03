@@ -18,7 +18,8 @@ from .pipeline import (
 )
 from .time_utils import to_utc
 
-_FORMAT_VERSION = 2
+_FORMAT_VERSION = 3
+_CONFIGURATION_FINGERPRINT_SIZE = 32
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _MICROSECOND = timedelta(microseconds=1)
 
@@ -28,6 +29,7 @@ class DecodedReservoirCheckpoint:
     """The trusted, decoded contents of one reservoir checkpoint."""
 
     reservoir_id: str
+    configuration_fingerprint: bytes
     pipeline_state: PipelineState[FilterStep]
 
 
@@ -59,16 +61,21 @@ class _Reader:
 
 def encode_reservoir_checkpoint(
     reservoir_id: str,
+    configuration_fingerprint: bytes,
     state: PipelineState[FilterStep],
 ) -> bytes:
     """Encode one trusted reservoir pipeline state without pickling it."""
 
     phase = state.phase
+    fingerprint = bytes(configuration_fingerprint)
+    if len(fingerprint) != _CONFIGURATION_FINGERPRINT_SIZE:
+        raise ValueError("configuration fingerprint must contain 32 bytes")
 
     encoded_reservoir_id = reservoir_id.encode("utf-8")
     result = bytearray([_FORMAT_VERSION])
     result.extend(_encode_varint(len(encoded_reservoir_id)))
     result.extend(encoded_reservoir_id)
+    result.extend(fingerprint)
     result.append(int(phase))
     if state.last_input_timestamp is None:
         result.append(0)
@@ -108,6 +115,7 @@ def decode_reservoir_checkpoint(
 
     reservoir_id_size = _decode_varint(reader)
     reservoir_id = reader.read(reservoir_id_size).decode("utf-8")
+    configuration_fingerprint = reader.read(_CONFIGURATION_FINGERPRINT_SIZE)
     phase = PipelineInitializationPhase(reader.read_byte())
     has_last_timestamp = reader.read_byte()
     last_input_timestamp = _unpack_timestamp(reader) if has_last_timestamp else None
@@ -139,6 +147,7 @@ def decode_reservoir_checkpoint(
     )
     return DecodedReservoirCheckpoint(
         reservoir_id=reservoir_id,
+        configuration_fingerprint=configuration_fingerprint,
         pipeline_state=state,
     )
 
