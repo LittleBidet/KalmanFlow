@@ -66,8 +66,11 @@ two-observation startup phase and later exposes an absolute fixed-lag RTS
 revised inflow for the same timestamp. The first finite-storage observation
 anchors the stream; it does not produce an inflow output by itself.
 Storage, measured outflow, and latent true outflow remain model inputs or
-internal state; no public outflow result is exposed. Generic filter and
-smoothing types remain available for advanced integrations.
+internal state; no public outflow result is exposed. The reservoir adapters
+can optionally project the inflow-rate diagonal of filtered and smoothed
+covariance into pointwise standard deviations; this output is disabled by
+default. Generic filter and smoothing types remain available for advanced
+integrations.
 
 Offline calibration uses `tune_inflow_noise_bayesian` with clean, aligned
 storage and discharge series. It proposes a new immutable configuration but

@@ -19,6 +19,7 @@ def run_inflow_model(
     r_outflow: float,
     smoothing_lag: timedelta = timedelta(hours=12),
     max_window_steps: int = 100_000,
+    include_uncertainty: bool = False,
 ) -> pandas.DataFrame:
     """Estimate causal and revised inflows from storage and outflow inputs.
 
@@ -26,7 +27,8 @@ def run_inflow_model(
     timezone-aware, strictly increasing ``DateTimeIndex``. Both columns are
     model inputs: outflow observations inform the latent water-balance state
     but are never returned. The result contains only causal ``estimated_inflow``
-    values and absolute fixed-lag ``revised_inflow`` replacements.
+    values and absolute fixed-lag ``revised_inflow`` replacements. Set
+    ``include_uncertainty=True`` to append model-based standard deviations.
     """
     return get_reservoir_inflow(
         observations["storage"],
@@ -38,4 +40,5 @@ def run_inflow_model(
         r_outflow=r_outflow,
         smoothing_lag=smoothing_lag,
         max_window_steps=max_window_steps,
+        include_uncertainty=include_uncertainty,
     )

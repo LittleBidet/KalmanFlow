@@ -16,6 +16,7 @@ from .core import (
     OnlineReservoirInflow,
     ReservoirFlowEstimate,
     ReservoirFlowUpdate,
+    add_inflow_uncertainty_intervals,
     get_reservoir_inflow,
     get_reservoir_inflow_from_config,
 )
@@ -72,6 +73,7 @@ __all__ = [
     "OutputFlag",
     "ReservoirFlowEstimate",
     "ReservoirFlowUpdate",
+    "add_inflow_uncertainty_intervals",
     "get_reservoir_inflow",
     "get_reservoir_inflow_from_config",
     "initial_filter_step",

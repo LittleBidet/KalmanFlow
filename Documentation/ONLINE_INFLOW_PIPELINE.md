@@ -21,6 +21,7 @@ from kalmanflow import Observation, OnlineReservoirInflow
 stream = OnlineReservoirInflow(
     q_storage=1.0, q_inflow=1.0, q_outflow=1.0,
     r_storage=1.0, r_outflow=1.0,
+    include_uncertainty=True,
 )
 update = stream.process(Observation(timestamp, storage, discharge))
 ```
@@ -28,8 +29,18 @@ update = stream.process(Observation(timestamp, storage, discharge))
 `filtered_inflows` are causal and marked `NON_SMOOTHED`. `revised_inflows`
 are released only after smoothing and marked `SMOOTHED`; each is an absolute
 inflow value that replaces the causal estimate at the same timestamp.
-Only `NaN` denotes a missing storage or discharge value; infinities are
-rejected before pipeline state changes.
+With `include_uncertainty=True`, each estimate also includes a
+`standard_deviation` in the same flow units. A revision replaces both the
+value and standard deviation previously published for that timestamp. With
+the default `False`, `standard_deviation` is `None`. Only `NaN` denotes a
+missing storage or discharge value; infinities are rejected before pipeline
+state changes.
+
+Call `estimate.uncertainty_interval(level=0.95)` for a normal-theory interval
+when an estimate has a standard deviation. The bounds are pointwise and
+model-based for the net inflow contribution, and negative bounds are retained.
+They exclude uncertainty in the selected configuration or its tuning, model
+bias, and other unmodeled exchanges.
 
 ## Checkpoints
 
@@ -37,13 +48,21 @@ Configured reservoir streams support compact checkpoints after a successful `pro
 
 ```python
 checkpoint = stream.checkpoint()
-restored = OnlineReservoirInflow.from_checkpoint(checkpoint, config=config)
+restored = OnlineReservoirInflow.from_checkpoint(
+    checkpoint,
+    config=config,
+    include_uncertainty=True,
+)
 ```
 
 A checkpoint is bound to one `reservoir_id` and a fingerprint of the model,
 covariance, smoothing-lag, and unit settings. Restore rejects a configuration
 that does not match. Restoration rebuilds the active smoothing window from its
-retained observations without re-emitting already released records.
+retained observations without re-emitting already released records. The
+checkpoint does not select the presentation mode for uncertainty; choose
+`include_uncertainty` explicitly each time a stream is constructed or
+restored. The model covariance is already part of the configured stream and
+is the source of any requested standard deviations.
 
 Checkpoints are version-bound. Checkpoints created before the package rename
 are rejected during restore and must be recreated.

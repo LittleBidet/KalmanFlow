@@ -37,14 +37,33 @@ Then pass it to either adapter:
 ```python
 from kalmanflow import OnlineReservoirInflow, get_reservoir_inflow_from_config
 
-stream = OnlineReservoirInflow.from_config(config)
-batch_result = get_reservoir_inflow_from_config(storage, discharge, config)
+stream = OnlineReservoirInflow.from_config(config, include_uncertainty=True)
+batch_result = get_reservoir_inflow_from_config(
+    storage,
+    discharge,
+    config,
+    include_uncertainty=True,
+)
 ```
 
 Both adapters use discharge as an observation input, but only return causal
 and revised inflow. A revised inflow is an absolute fixed-lag-smoothed value
 that replaces the causal inflow at its timestamp; it is not an adjustment to
-add. The latent true outflow state is never a public result.
+add. With `include_uncertainty=True`, both adapters also return the pointwise
+standard deviation of each inflow estimate from the corresponding covariance;
+the default remains off. The latent true outflow state is never a public
+result.
+
+For a streaming interval, call `estimate.uncertainty_interval(level=0.95)`.
+For a batch interval, pass an uncertainty-enabled result to
+`add_inflow_uncertainty_intervals(result, level=0.95)`. The helper adds lower
+and upper columns to a copy of the result and preserves `NaN` for unreleased
+revisions, including the trailing row. Intervals are pointwise,
+model-based normal-theory intervals for the net inflow contribution, in the
+same flow units as the estimate, and negative bounds are retained. They do
+not include uncertainty in the selected configuration or tuning, model bias,
+or other unmodeled water exchanges. Select `include_uncertainty` again when
+restoring from a checkpoint; it is an output option chosen by the caller.
 
 ## Matrix and unit conventions
 

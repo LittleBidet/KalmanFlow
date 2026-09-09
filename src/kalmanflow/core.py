@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from statistics import NormalDist
 from typing import Final
 
 import numpy as np
@@ -29,6 +31,78 @@ from .time_utils import to_utc, validate_timestamp_precision
 _UNSET: Final = object()
 
 
+def _validate_include_uncertainty(value: object) -> bool:
+    """Validate the opt-in uncertainty output switch."""
+
+    if not isinstance(value, bool):
+        raise TypeError("include_uncertainty must be a bool")
+    return value
+
+
+def _validated_interval_level(level: object) -> float:
+    """Return a finite central interval level strictly inside (0, 1)."""
+
+    try:
+        value = float(level)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "level must be finite and strictly between 0 and 1"
+        ) from error
+    if not math.isfinite(value) or not 0.0 < value < 1.0:
+        raise ValueError("level must be finite and strictly between 0 and 1")
+    return value
+
+
+def _normal_interval_multiplier(level: object) -> float:
+    """Return the two-sided normal multiplier for a central interval."""
+
+    validated_level = _validated_interval_level(level)
+    # Compute from the lower tail so a high, valid level does not round its
+    # upper-tail probability to exactly one before NormalDist sees it.
+    multiplier = -NormalDist().inv_cdf((1.0 - validated_level) / 2.0)
+    if not math.isfinite(multiplier):
+        raise ValueError("level must produce a finite normal interval")
+    return multiplier
+
+
+def _inflow_standard_deviation(
+    covariance: object,
+    *,
+    name: str,
+) -> float:
+    """Extract and validate the inflow-rate standard deviation from covariance."""
+
+    array = np.asarray(covariance, dtype=float)
+    if array.ndim != 2 or array.shape[0] <= 1 or array.shape[1] <= 1:
+        raise ValueError(f"{name} must contain an inflow covariance entry")
+    if not np.isfinite(array).all():
+        raise ValueError(f"{name} must contain only finite values")
+    variance = float(array[1, 1])
+    tolerance = 1e-12 * max(1.0, abs(variance))
+    if variance < -tolerance:
+        raise ValueError(f"{name} has a materially negative inflow variance")
+    return math.sqrt(max(variance, 0.0))
+
+
+def _inflow_standard_deviations(
+    covariances: object,
+    *,
+    name: str,
+) -> np.ndarray:
+    """Extract validated inflow standard deviations from covariance matrices."""
+
+    array = np.asarray(covariances, dtype=float)
+    if array.ndim != 3 or array.shape[1] <= 1 or array.shape[2] <= 1:
+        raise ValueError(f"{name} must contain inflow covariance entries")
+    if not np.isfinite(array).all():
+        raise ValueError(f"{name} must contain only finite values")
+    variances = np.asarray(array[:, 1, 1], dtype=float)
+    tolerance = 1e-12 * np.maximum(1.0, np.abs(variances))
+    if np.any(variances < -tolerance):
+        raise ValueError(f"{name} has a materially negative inflow variance")
+    return np.sqrt(np.maximum(variances, 0.0))
+
+
 @dataclass(frozen=True)
 class ReservoirFlowEstimate:
     """One timestamped public flow estimate."""
@@ -37,6 +111,7 @@ class ReservoirFlowEstimate:
     value: float
     prediction_flag: OutputFlag = OutputFlag.NORMAL
     smoothing_flag: OutputFlag = OutputFlag.NON_SMOOTHED
+    standard_deviation: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.timestamp, datetime):
@@ -56,9 +131,35 @@ class ReservoirFlowEstimate:
         value = float(self.value)
         if not np.isfinite(value):
             raise ValueError("value must be finite")
+        standard_deviation = self.standard_deviation
+        if standard_deviation is not None:
+            standard_deviation = float(standard_deviation)
+            if not np.isfinite(standard_deviation):
+                raise ValueError("standard_deviation must be finite or None")
+            if standard_deviation < 0.0:
+                raise ValueError("standard_deviation must be non-negative")
         object.__setattr__(self, "value", value)
         object.__setattr__(self, "prediction_flag", prediction_flag)
         object.__setattr__(self, "smoothing_flag", smoothing_flag)
+        object.__setattr__(self, "standard_deviation", standard_deviation)
+
+    def uncertainty_interval(self, level: float = 0.95) -> tuple[float, float]:
+        """Return a central normal interval for this estimate.
+
+        Raises
+        ------
+        ValueError
+            If ``level`` is not finite and strictly between zero and one, or
+            if uncertainty was not requested for this estimate.
+        """
+
+        multiplier = _normal_interval_multiplier(level)
+        if self.standard_deviation is None:
+            raise ValueError(
+                "uncertainty is unavailable; enable include_uncertainty"
+            )
+        spread = multiplier * self.standard_deviation
+        return self.value - spread, self.value + spread
 
 @dataclass(frozen=True)
 class ReservoirFlowUpdate:
@@ -89,12 +190,17 @@ class OnlineReservoirInflow:
         smoothing_lag: timedelta = timedelta(hours=12),
         max_window_steps: int = 100_000,
         reservoir_id: str | None = None,
+        include_uncertainty: bool = False,
     ) -> None:
         """Create an estimator with the supplied noise settings.
 
         ``reservoir_id`` is optional. It is required only when creating a
         checkpoint; callers using resumable streams should prefer
         :meth:`from_config`.
+
+        Set ``include_uncertainty=True`` to attach model-based inflow standard
+        deviations to streaming estimates. The option does not affect
+        checkpoint replay state.
         """
 
         backend = _build_default_backend(
@@ -114,6 +220,9 @@ class OnlineReservoirInflow:
             smoothing_lag,
         )
         self._reservoir_id = reservoir_id
+        self._include_uncertainty = _validate_include_uncertainty(
+            include_uncertainty
+        )
         self._processing = False
         self._checkpoint_ready = False
 
@@ -123,6 +232,7 @@ class OnlineReservoirInflow:
         config: ReservoirConfig,
         *,
         max_window_steps: int = 100_000,
+        include_uncertainty: bool = False,
     ) -> OnlineReservoirInflow:
         """Create an estimator from a validated reservoir configuration."""
 
@@ -138,6 +248,9 @@ class OnlineReservoirInflow:
             config.smoothing_lag,
         )
         instance._reservoir_id = config.reservoir_id
+        instance._include_uncertainty = _validate_include_uncertainty(
+            include_uncertainty
+        )
         instance._processing = False
         instance._checkpoint_ready = False
         return instance
@@ -149,6 +262,7 @@ class OnlineReservoirInflow:
         *,
         config: ReservoirConfig,
         max_window_steps: int = 100_000,
+        include_uncertainty: bool = False,
     ) -> OnlineReservoirInflow:
         """Restore one reservoir stream from a checkpoint.
 
@@ -161,7 +275,11 @@ class OnlineReservoirInflow:
             raise ValueError(
                 "checkpoint reservoir_id does not match config.reservoir_id"
             )
-        instance = cls.from_config(config, max_window_steps=max_window_steps)
+        instance = cls.from_config(
+            config,
+            max_window_steps=max_window_steps,
+            include_uncertainty=include_uncertainty,
+        )
         if (
             decoded.configuration_fingerprint
             != instance._configuration_fingerprint
@@ -346,8 +464,7 @@ class OnlineReservoirInflow:
         if not self._processing:
             self._checkpoint_ready = False
 
-    @staticmethod
-    def _to_public_update(update) -> ReservoirFlowUpdate:
+    def _to_public_update(self, update) -> ReservoirFlowUpdate:
         """Create public flow outputs before the stream becomes checkpointable."""
 
         return ReservoirFlowUpdate(
@@ -357,6 +474,14 @@ class OnlineReservoirInflow:
                     value=float(step.filtered_mean[1]),
                     prediction_flag=step.prediction_flag,
                     smoothing_flag=OutputFlag.NON_SMOOTHED,
+                    standard_deviation=(
+                        _inflow_standard_deviation(
+                            step.filtered_covariance,
+                            name="filtered covariance",
+                        )
+                        if self._include_uncertainty
+                        else None
+                    ),
                 )
                 for step in update.filtered_states
             ),
@@ -366,6 +491,14 @@ class OnlineReservoirInflow:
                     value=float(state.mean[1]),
                     prediction_flag=state.prediction_flag,
                     smoothing_flag=OutputFlag.SMOOTHED,
+                    standard_deviation=(
+                        _inflow_standard_deviation(
+                            state.covariance,
+                            name="smoothed covariance",
+                        )
+                        if self._include_uncertainty
+                        else None
+                    ),
                 )
                 for state in update.smoothed_states
             ),
@@ -437,6 +570,7 @@ def get_reservoir_inflow(
     smoothing_lag: timedelta = timedelta(hours=12),
     *,
     max_window_steps: int = 100_000,
+    include_uncertainty: bool = False,
 ) -> pandas.DataFrame:
     """
     Adapt pandas storage/outflow series to an inflow pipeline.
@@ -467,6 +601,8 @@ def get_reservoir_inflow(
     :param smoothing_lag: Time lag before delayed inflow revisions are finalized.
     :param max_window_steps: Maximum number of active states for the fixed-lag
         smoother.
+    :param include_uncertainty: Append filtered and revised inflow standard
+        deviations to the result when true. Disabled by default.
     Input series must be pre-cleaned by the caller: parsed, aligned, sorted, and
     deduplicated. Missing storage or discharge samples may remain as NaN; the
     pipeline applies the documented missing-value rules but does not otherwise
@@ -481,6 +617,7 @@ def get_reservoir_inflow(
     """
     if not reservoir_storage.index.equals(reservoir_outflow.index):
         raise ValueError("storage and outflow indexes must match exactly")
+    include_uncertainty = _validate_include_uncertainty(include_uncertainty)
 
     backend = _build_default_backend(
         q_storage=q_storage,
@@ -495,6 +632,7 @@ def get_reservoir_inflow(
         backend=backend,
         smoothing_lag=smoothing_lag,
         max_window_steps=max_window_steps,
+        include_uncertainty=include_uncertainty,
     )
 
 
@@ -504,16 +642,20 @@ def get_reservoir_inflow_from_config(
     config: ReservoirConfig,
     *,
     max_window_steps: int = 100_000,
+    include_uncertainty: bool = False,
 ) -> pandas.DataFrame:
     """Estimate reservoir flows using one validated configuration.
 
     The input and output flow rates use ``config.unit_system.flow_label``;
     storage uses ``config.unit_system.volume_label``. Inputs follow the same
     pre-cleaned index and missing-value contract as :func:`get_reservoir_inflow`.
+    Set ``include_uncertainty=True`` to append model-based inflow standard
+    deviations.
     """
 
     if not reservoir_storage.index.equals(reservoir_outflow.index):
         raise ValueError("storage and outflow indexes must match exactly")
+    include_uncertainty = _validate_include_uncertainty(include_uncertainty)
 
     return _run_batch(
         reservoir_storage,
@@ -521,7 +663,86 @@ def get_reservoir_inflow_from_config(
         backend=_build_configured_backend(config),
         smoothing_lag=config.smoothing_lag,
         max_window_steps=max_window_steps,
+        include_uncertainty=include_uncertainty,
     )
+
+
+def add_inflow_uncertainty_intervals(
+    result: pandas.DataFrame,
+    level: float = 0.95,
+) -> pandas.DataFrame:
+    """Append central normal interval columns to an uncertain batch result.
+
+    ``result`` must contain the standard-deviation columns produced by
+    :func:`get_reservoir_inflow` or :func:`get_reservoir_inflow_from_config`
+    with ``include_uncertainty=True``. The input frame is not modified.
+    Missing estimates and their matching standard deviations remain missing.
+    """
+
+    if not isinstance(result, pandas.DataFrame):
+        raise TypeError("result must be a pandas DataFrame")
+    multiplier = _normal_interval_multiplier(level)
+    required_columns = (
+        "estimated_inflow",
+        "revised_inflow",
+        "estimated_inflow_standard_deviation",
+        "revised_inflow_standard_deviation",
+    )
+    missing_columns = [
+        column for column in required_columns if column not in result.columns
+    ]
+    if missing_columns:
+        joined = ", ".join(missing_columns)
+        raise ValueError(
+            "result must include uncertainty columns; run with "
+            f"include_uncertainty=True (missing: {joined})"
+        )
+
+    output = result.copy()
+    for prefix in ("estimated_inflow", "revised_inflow"):
+        values = output[prefix].to_numpy(dtype=float)
+        standard_deviations = output[
+            f"{prefix}_standard_deviation"
+        ].to_numpy(dtype=float)
+        _validate_batch_interval_inputs(
+            values,
+            standard_deviations,
+            prefix=prefix,
+        )
+        spread = multiplier * standard_deviations
+        output[f"{prefix}_lower"] = values - spread
+        output[f"{prefix}_upper"] = values + spread
+    return output
+
+
+def _validate_batch_interval_inputs(
+    values: np.ndarray,
+    standard_deviations: np.ndarray,
+    *,
+    prefix: str,
+) -> None:
+    """Validate paired estimate and uncertainty arrays for interval output."""
+
+    if values.shape != standard_deviations.shape:
+        raise ValueError(f"{prefix} and uncertainty columns must have matching lengths")
+    invalid_values = ~np.isfinite(values) & ~np.isnan(values)
+    if np.any(invalid_values):
+        raise ValueError(f"{prefix} must contain only finite values or NaN")
+    invalid_deviations = ~np.isfinite(standard_deviations) & ~np.isnan(
+        standard_deviations
+    )
+    if np.any(invalid_deviations):
+        raise ValueError(
+            f"{prefix}_standard_deviation must contain only finite values or NaN"
+        )
+    finite_values = np.isfinite(values)
+    finite_deviations = np.isfinite(standard_deviations)
+    if np.any(finite_values != finite_deviations):
+        raise ValueError(
+            f"{prefix} and {prefix}_standard_deviation must be missing together"
+        )
+    if np.any(standard_deviations[finite_deviations] < 0.0):
+        raise ValueError(f"{prefix}_standard_deviation must be non-negative")
 
 
 def _build_default_backend(
@@ -620,6 +841,7 @@ def _run_batch(
     backend: ReservoirBackend,
     smoothing_lag: timedelta,
     max_window_steps: int,
+    include_uncertainty: bool,
 ) -> pandas.DataFrame:
     """Run the reservoir batch kernel without streaming output objects."""
 
@@ -630,6 +852,7 @@ def _run_batch(
         backend=backend,
         smoothing_lag=smoothing_lag,
         max_window_steps=max_window_steps,
+        include_uncertainty=include_uncertainty,
     )
 
 
@@ -641,6 +864,7 @@ def _process_reservoir_batch_raw(
     backend: ReservoirBackend,
     smoothing_lag: timedelta,
     max_window_steps: int,
+    include_uncertainty: bool,
 ) -> pandas.DataFrame:
     """Estimate one complete reservoir series into dense NumPy result columns.
 
@@ -656,6 +880,7 @@ def _process_reservoir_batch_raw(
         name="max_window_steps",
         minimum=2,
     )
+    include_uncertainty = _validate_include_uncertainty(include_uncertainty)
     if len(index) != len(storage) or len(index) != len(discharge):
         raise ValueError("batch inputs must have matching lengths")
     if np.isinf(storage).any():
@@ -664,7 +889,9 @@ def _process_reservoir_batch_raw(
         raise ValueError("discharge must contain only finite values or NaN")
 
     _validate_batch_timestamps(index)
-    result = _empty_batch_columns(len(index))
+    result = _empty_batch_columns(
+        len(index), include_uncertainty=include_uncertainty
+    )
     first, second = _initialization_positions(storage, discharge)
     if second is None:
         return pandas.DataFrame(result, index=index)
@@ -708,6 +935,13 @@ def _process_reservoir_batch_raw(
     )
     result["estimated_inflow"][positions] = filtered.filtered_means[:, 1]
     result["estimated_inflow_flag"][positions] = prediction_flags
+    if include_uncertainty:
+        result["estimated_inflow_standard_deviation"][positions] = (
+            _inflow_standard_deviations(
+                filtered.filtered_covariances,
+                name="filtered covariance",
+            )
+        )
     _write_fixed_lag_inflow_revisions(
         result,
         positions=positions,
@@ -716,14 +950,19 @@ def _process_reservoir_batch_raw(
         prediction_flags=prediction_flags,
         smoothing_lag=smoothing_lag,
         max_window_steps=max_window_steps,
+        include_uncertainty=include_uncertainty,
     )
     return pandas.DataFrame(result, index=index)
 
 
-def _empty_batch_columns(length: int) -> dict[str, np.ndarray]:
+def _empty_batch_columns(
+    length: int,
+    *,
+    include_uncertainty: bool = False,
+) -> dict[str, np.ndarray]:
     """Create the public result layout with dense, preallocated columns."""
 
-    return {
+    columns = {
         "estimated_inflow": np.full(length, np.nan),
         "revised_inflow": np.full(length, np.nan),
         "estimated_inflow_flag": np.full(length, None, dtype=object),
@@ -735,6 +974,14 @@ def _empty_batch_columns(length: int) -> dict[str, np.ndarray]:
             length, OutputFlag.NON_SMOOTHED.value, dtype=object
         ),
     }
+    if include_uncertainty:
+        columns.update(
+            {
+                "estimated_inflow_standard_deviation": np.full(length, np.nan),
+                "revised_inflow_standard_deviation": np.full(length, np.nan),
+            }
+        )
+    return columns
 
 
 def _initialization_positions(
@@ -777,6 +1024,7 @@ def _write_fixed_lag_inflow_revisions(
     prediction_flags: np.ndarray,
     smoothing_lag: timedelta,
     max_window_steps: int,
+    include_uncertainty: bool,
 ) -> None:
     """Write absolute fixed-lag RTS inflow replacements for finalized states."""
 
@@ -799,7 +1047,7 @@ def _write_fixed_lag_inflow_revisions(
 
         window = np.fromiter(active, dtype=int)
         window = np.append(window, current)
-        smoothed_means, _, _ = _rts_smooth_arrays(
+        smoothed_means, smoothed_covariances, _ = _rts_smooth_arrays(
             filtered.filtered_means[window],
             filtered.filtered_covariances[window],
             filtered.predicted_means[window],
@@ -809,6 +1057,13 @@ def _write_fixed_lag_inflow_revisions(
         finalized = window[:eligible]
         output_positions = positions[finalized]
         result["revised_inflow"][output_positions] = smoothed_means[:eligible, 1]
+        if include_uncertainty:
+            result["revised_inflow_standard_deviation"][output_positions] = (
+                _inflow_standard_deviations(
+                    smoothed_covariances[:eligible],
+                    name="smoothed covariance",
+                )
+            )
         result["revised_inflow_flag"][output_positions] = prediction_flags[finalized]
         result["revised_inflow_smoothing_flag"][output_positions] = (
             OutputFlag.SMOOTHED.value

@@ -4,6 +4,12 @@
 
 `get_reservoir_inflow` and `get_reservoir_inflow_from_config` accept pre-cleaned storage and discharge `pandas.Series` with exactly equal, timezone-aware, strictly increasing indexes. Observation timestamps support microsecond precision; finer pandas timestamps are rejected before computation. The default adapter expects storage in acre-feet and discharge in cfs. The configured adapter uses the labels in `ReservoirConfig.unit_system`.
 
+Inflow uncertainty is optional and is disabled by default. Pass
+`include_uncertainty=True` to a batch adapter or streaming constructor when
+standard deviations are needed. A checkpoint restores model state only; the
+caller chooses the uncertainty output option again with
+`from_checkpoint(..., include_uncertainty=...)`.
+
 `OnlineReservoirInflow.process` accepts either an `Observation` or `timestamp`, `storage`, and `discharge` keywords. Timestamps must be timezone-aware, no finer than microseconds, and strictly later than the previously accepted observation. All elapsed-time comparisons are normalized to UTC. Validation-window boundaries may retain nanosecond precision because they are interval labels rather than observations.
 
 The package intentionally does not sort, align, deduplicate, interpolate, or impute inputs.
@@ -38,12 +44,47 @@ When a revised inflow becomes available, it replaces `estimated_inflow` at the
 same timestamp; it is not a delta to add to that value. Storage and outflow
 are internal states and are not public batch outputs.
 
+### Optional uncertainty outputs
+
+With `include_uncertainty=True`, the batch adapters append these columns after
+the six columns above:
+
+| Column | Meaning |
+| --- | --- |
+| `estimated_inflow_standard_deviation` | Pointwise standard deviation of the causal filtered inflow. |
+| `revised_inflow_standard_deviation` | Pointwise standard deviation of the fixed-lag-smoothed inflow replacement. |
+
+The values come from the inflow-rate entry `[1, 1]` of the corresponding
+filtered or smoothed covariance. They use the same flow units as the inflow
+estimate. Without opt-in, the batch schema remains unchanged and streaming
+estimates carry `standard_deviation=None`.
+
+Use `add_inflow_uncertainty_intervals(result, level=0.95)` to add
+`estimated_inflow_lower`, `estimated_inflow_upper`, `revised_inflow_lower`,
+and `revised_inflow_upper` to a result created with uncertainty enabled. The
+helper returns a copy and uses a central normal-theory interval. It preserves
+negative bounds. A row without a published estimate has `NaN` bounds; the
+trailing revised row is therefore `NaN` until a later observation finalizes it.
+The same rule applies to `ReservoirFlowEstimate.uncertainty_interval()` in
+the streaming API, which raises if that estimate has no standard deviation.
+
+These are pointwise, model-based uncertainty intervals for the net inflow
+contribution, not empirical coverage guarantees. They include the uncertainty
+represented by the selected filter covariance and exclude uncertainty in
+configuration or noise-parameter tuning, model bias, and other unmodeled water
+exchanges. The startup covariance is an engineering approximation rather than
+a measurement-conditioned calibration; interpret early uncertainty using that
+existing startup caveat.
+
 ## Streaming outputs
 
 Each call to `OnlineReservoirInflow.process` returns a `ReservoirFlowUpdate`.
 `filtered_inflows` contains newly available causal inflow estimates;
 `revised_inflows` contains only newly finalized, absolute smoothed
-replacements at their original timestamps. The initial successful call that
+replacements at their original timestamps. With `include_uncertainty=True`,
+each estimate also carries its pointwise `standard_deviation`; with the
+default setting the field is `None`. A revised estimate replaces both the
+previous causal value and its uncertainty. The initial successful call that
 completes initialization can emit two filtered inflow estimates. The active
 smoothing window is retained internally and is bounded by `max_window_steps`.
 Although both startup estimates are emitted together, the anchor estimate was

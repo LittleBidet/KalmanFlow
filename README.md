@@ -1,5 +1,11 @@
 # KalmanFlow
 
+| | Status |
+| --- | --- |
+| Testing | [![Tests](https://github.com/LittleBidet/KalmanFlow/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/LittleBidet/KalmanFlow/actions/workflows/tests.yml) |
+| Package | [![PyPI](https://img.shields.io/pypi/v/kalmanflow)](https://pypi.org/project/kalmanflow/) [![Python versions](https://img.shields.io/pypi/pyversions/kalmanflow)](https://pypi.org/project/kalmanflow/) |
+| License | [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/LittleBidet/KalmanFlow/blob/main/LICENSE) |
+
 KalmanFlow estimates an inflow contribution from noisy storage and measured discharge. It provides a three-state physical water-balance model, causal Kalman filtering, and fixed-lag Rauch–Tung–Striebel (RTS) smoothing for delayed inflow revisions.
 
 The package is intentionally data-source agnostic: applications are responsible for parsing, cleaning, aligning, and persisting reservoir data.
@@ -79,6 +85,78 @@ for revision in update.revised_inflows:
     print(revision.timestamp, revision.value, revision.smoothing_flag)
 ```
 
+### Optional inflow uncertainty
+
+Inflow uncertainty is opt-in. The default `include_uncertainty=False` keeps
+the existing six-column batch result, and streaming estimates expose
+`standard_deviation=None`. Set `include_uncertainty=True` on a batch adapter
+or stream constructor to include the inflow standard deviation calculated from
+the filter covariance:
+
+```python
+from datetime import UTC, datetime, timedelta
+
+import pandas as pd
+
+from kalmanflow import (
+    Observation,
+    OnlineReservoirInflow,
+    add_inflow_uncertainty_intervals,
+    get_reservoir_inflow,
+)
+
+stream = OnlineReservoirInflow(
+    q_storage=1.0,
+    q_inflow=1.0,
+    q_outflow=1.0,
+    r_storage=100.0,
+    r_outflow=25.0,
+    smoothing_lag=timedelta(minutes=15),
+    include_uncertainty=True,
+)
+stream.process(
+    Observation(
+        datetime(2026, 1, 1, tzinfo=UTC),
+        storage=10_000.0,
+        discharge=25.0,
+    )
+)
+update = stream.process(
+    Observation(
+        datetime(2026, 1, 1, 0, 15, tzinfo=UTC),
+        storage=10_001.0,
+        discharge=25.5,
+    )
+)
+for estimate in update.filtered_inflows:
+    print(estimate.value, estimate.standard_deviation)
+    print(estimate.uncertainty_interval(level=0.95))
+
+index = pd.date_range("2026-01-01", periods=3, freq="15min", tz="UTC")
+storage = pd.Series([10_000.0, 10_001.0, 10_003.0], index=index)
+discharge = pd.Series([25.0, 25.5, 26.0], index=index)
+result = get_reservoir_inflow(
+    storage,
+    discharge,
+    q_storage=1.0,
+    q_inflow=1.0,
+    q_outflow=1.0,
+    r_storage=100.0,
+    r_outflow=25.0,
+    smoothing_lag=timedelta(minutes=15),
+    include_uncertainty=True,
+)
+result_with_intervals = add_inflow_uncertainty_intervals(result, level=0.95)
+```
+
+The opt-in batch result appends `estimated_inflow_standard_deviation` and
+`revised_inflow_standard_deviation`. `add_inflow_uncertainty_intervals`
+returns a copy with lower and upper columns for both estimates. These are
+pointwise, model-based intervals for the net inflow contribution, in the same
+flow units as the estimate. Bounds are not clipped at zero. A revised record
+replaces both the earlier causal value and its standard deviation; unreleased
+revisions, including the trailing row, remain `NaN`.
+
 
 
 ## Primary APIs
@@ -91,6 +169,7 @@ for revision in update.revised_inflows:
 | `OnlineReservoirInflow`                     | You process one reservoir’s observations as they arrive.                                                            |
 | `OnlineReservoirInflow.from_config`         | You need a configured, checkpoint-capable streaming estimator.                                                      |
 | `OnlineInflowPipeline`                      | You are integrating a custom backend or smoother.                                                                   |
+| `add_inflow_uncertainty_intervals`          | You want normal-theory lower and upper interval columns for an opt-in batch result.                                 |
 | `tune_inflow_noise_bayesian` (experimental) | You want to propose five diagonal `q`/`r` noise terms from causal innovation scores; requires `kalmanflow[tuning]`. |
 | `evaluate_configuration`                    | You want to assess one frozen configuration on an untouched period without searching.                               |
 | Notebook-local `validation.py`              | You want hourly proxy-agreement, lag, and storage-closure validation tables and plots.                              |

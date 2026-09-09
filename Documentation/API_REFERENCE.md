@@ -13,15 +13,16 @@ compatibility promise.
 | Export | Purpose |
 | --- | --- |
 | `Observation(timestamp, storage, discharge)` | Immutable streaming input. Timestamp must be timezone-aware and no finer than microsecond precision; use `NaN` for a missing value after initialization. |
-| `OnlineReservoirInflow` | Default acre-ft/cfs streaming estimator. Construct with the five scalar diagonal noise values; use `process`, `process_many`, `initialized`, and `pending_count`. |
-| `OnlineReservoirInflow.from_config(config)` | Creates a stream from reviewed configuration, including its units and smoothing lag. |
-| `OnlineReservoirInflow.from_checkpoint(checkpoint, config=...)` | Restores a configured stream. The reservoir ID and fingerprinted model, covariance, lag, and unit settings must match. |
+| `OnlineReservoirInflow` | Default acre-ft/cfs streaming estimator. Construct with the five scalar diagonal noise values; use `process`, `process_many`, `initialized`, and `pending_count`. Set keyword-only `include_uncertainty=True` to publish inflow standard deviations. |
+| `OnlineReservoirInflow.from_config(config, include_uncertainty=False)` | Creates a stream from reviewed configuration, including its units and smoothing lag. Set `include_uncertainty=True` to publish inflow standard deviations. |
+| `OnlineReservoirInflow.from_checkpoint(checkpoint, config=..., include_uncertainty=False)` | Restores a configured stream. The reservoir ID and fingerprinted model, covariance, lag, and unit settings must match. Choose the uncertainty output option again when restoring. |
 | `OnlineReservoirInflow.checkpoint()` | Produces resumable state after a successful call. It requires a reservoir ID; streams made with `from_config` have one. |
-| `ReservoirFlowEstimate` | One timestamped inflow value with `prediction_flag` and `smoothing_flag`. |
+| `ReservoirFlowEstimate` | One timestamped inflow value with `prediction_flag`, `smoothing_flag`, and optional `standard_deviation`. Call `uncertainty_interval(level=0.95)` when standard deviation is available. |
 | `ReservoirFlowUpdate` | The streaming return value: `filtered_inflows` are causal and `revised_inflows` are absolute, finalized replacements. |
-| `get_reservoir_inflow(storage, outflow, ...)` | Default acre-ft/cfs batch estimator. It returns the six documented inflow and provenance columns. |
-| `get_reservoir_inflow_from_config(storage, outflow, config)` | Batch estimator using a `ReservoirConfig` and its unit system. |
-| `run_inflow_model(observations, ...)` | DataFrame convenience form of `get_reservoir_inflow`; the frame must have `storage` and `outflow` columns. |
+| `get_reservoir_inflow(storage, outflow, ..., include_uncertainty=False)` | Default acre-ft/cfs batch estimator. It returns the six documented inflow and provenance columns by default; opt in to append two standard-deviation columns. |
+| `get_reservoir_inflow_from_config(storage, outflow, config, ..., include_uncertainty=False)` | Batch estimator using a `ReservoirConfig` and its unit system, with optional inflow standard deviations. |
+| `run_inflow_model(observations, ..., include_uncertainty=False)` | DataFrame convenience form of `get_reservoir_inflow`; the frame must have `storage` and `outflow` columns. |
+| `add_inflow_uncertainty_intervals(result, level=0.95)` | Returns a copy of an opt-in batch result with lower and upper normal-theory interval columns for causal and revised inflow. |
 | `OutputFlag` | `NORMAL` or `PREDICTED` describes observation completeness; `SMOOTHED` or `NON_SMOOTHED` describes estimate provenance. |
 
 Both batch series must share an exactly equal timezone-aware, strictly
@@ -30,6 +31,43 @@ neither aligns nor cleans inputs. A revised
 inflow always replaces the causal value at the same timestamp; it is never a
 delta. See [model behavior](INFLOW_MODEL_BEHAVIOR.md) for initialization,
 partial observations, and output columns.
+
+### Optional inflow uncertainty
+
+Uncertainty output is disabled by default. When `include_uncertainty=True`,
+the streaming `ReservoirFlowEstimate.standard_deviation` is derived from the
+inflow entry of the filtered or fixed-lag smoothed covariance. A disabled
+stream sets the field to `None`. The opt-in batch schema appends
+`estimated_inflow_standard_deviation` and
+`revised_inflow_standard_deviation` after the existing six columns, so callers
+that use the default keep the original schema.
+
+Use `estimate.uncertainty_interval(level=0.95)` for one streaming estimate or
+`add_inflow_uncertainty_intervals(result, level=0.95)` for a batch result. The
+batch helper requires both standard-deviation columns, returns a copy, and
+adds `estimated_inflow_lower`, `estimated_inflow_upper`,
+`revised_inflow_lower`, and `revised_inflow_upper`. Unpublished revised values
+and their uncertainty remain `NaN`, including the trailing row. A revision
+replaces the causal value and standard deviation at its timestamp.
+
+`level` must be finite and strictly between zero and one. The streaming
+helper raises `ValueError` when standard deviation is unavailable; the batch
+helper raises `ValueError` when uncertainty columns are missing or invalid.
+Calling the batch helper again replaces its four interval columns using the
+new level.
+
+Standard deviations use `sqrt(P[1, 1])`. A negative inflow variance within
+`1e-12 * max(1, abs(P[1, 1]))` of zero is treated as numerical roundoff and
+clamped to zero; more negative or nonfinite covariance values raise
+`ValueError`. This tolerance uses the inflow variance in the configured
+squared flow units, without scaling it by storage covariance.
+
+The intervals are pointwise, model-based normal-theory intervals for the net
+inflow contribution. Bounds use the same flow units as the estimate and are
+not clipped at zero. They reflect the selected filter covariance; uncertainty
+in configuration or noise-parameter tuning, model bias, and other unmodeled
+exchanges is excluded. The default startup covariance is an engineering
+approximation, so early uncertainty should be interpreted with that caveat.
 
 The reservoir inflow state is an inferred net balance contribution from the
 supplied storage and accounted outflow. Measured outflow should cover outlet
