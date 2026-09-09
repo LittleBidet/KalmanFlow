@@ -16,7 +16,7 @@ The reported inflow is the residual term in the supplied storage and outflow bal
 
 ## Install
 
-KalmanFlow requires Python 3.14 or newer.
+KalmanFlow requires Python 3.12 or newer.
 
 ```bash
 pip install kalmanflow

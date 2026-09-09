@@ -5,13 +5,20 @@ build/
 dist/
 wheels/
 *.egg-info
-.DS_Store
 
 # Virtual environments
 .venv
 
-#Additional files
-Reservoirs
+# Test, lint, and dependency caches
+.pytest_cache/
+.ruff_cache/
+.uv-cache/
+
+# Coverage reports
 .coverage
-.vscode
-Outputs
+.coverage.*
+htmlcov/
+
+# Local reservoir data and generated analysis outputs
+/Reservoirs/
+/Outputs/

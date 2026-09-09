@@ -201,7 +201,7 @@ def _fit_and_acquire(
         expected = improvement * ndtr(z) + std * _normal_pdf(z)
         expected[std <= 0.0] = 0.0
         return pool[int(np.argmax(expected))], "expected-improvement"
-    except ValueError, RuntimeError, np.linalg.LinAlgError:
+    except (ValueError, RuntimeError, np.linalg.LinAlgError):
         # A numerical GP failure should not prevent a bounded deterministic
         # search from completing.
         distances = np.min(

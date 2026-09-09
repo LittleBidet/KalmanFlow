@@ -1,11 +1,11 @@
 [project]
 name = "kalmanflow"
-version = "0.1.0"
+version = "0.1.0a1"
 description = "Causal filtering and fixed-lag inflow revisions for reservoir inflow estimation."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.4.6",
     "pandas>=3.0.5",
@@ -15,6 +15,8 @@ classifiers = [
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
 ]
@@ -71,7 +73,7 @@ extend-exclude = [
     "dist",
 ]
 line-length = 88
-target-version = "py314"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["B", "E", "F", "I", "UP"]
