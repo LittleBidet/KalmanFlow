@@ -1,6 +1,6 @@
 [project]
 name = "kalmanflow"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Causal filtering and fixed-lag inflow revisions for reservoir inflow estimation."
 readme = "README.md"
 license = "Apache-2.0"
