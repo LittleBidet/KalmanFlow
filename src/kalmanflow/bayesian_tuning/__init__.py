@@ -1,7 +1,9 @@
-"""Bayesian innovation tuning for diagonal reservoir noise covariances.
+"""Experimental Bayesian innovation tuning for reservoir noise covariances.
 
 The public API is defined here; implementation details live in the focused
-subpackage modules below.
+subpackage modules below. Search requires ``kalmanflow[tuning]``; frozen
+configuration evaluation requires only the base dependencies. The tuning API,
+selection rules, and result schema may change between releases.
 """
 
 from ._types import (

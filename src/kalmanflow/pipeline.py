@@ -8,8 +8,8 @@ from enum import IntEnum
 from math import isfinite
 from typing import Protocol, TypeVar
 
-from ._validation import bounded_integer
-from .time_utils import to_utc
+from ._validation import bounded_integer, measurement_value
+from .time_utils import to_utc, validate_timestamp_precision
 
 FilterStep = TypeVar("FilterStep")
 SmoothedState = TypeVar("SmoothedState")
@@ -22,6 +22,20 @@ class InitializationObservation:
     timestamp: datetime
     storage: float
     discharge: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.timestamp, datetime):
+            raise TypeError("timestamp must be a datetime instance")
+        to_utc(self.timestamp)
+        validate_timestamp_precision(self.timestamp)
+        object.__setattr__(
+            self, "storage", measurement_value(self.storage, name="storage")
+        )
+        object.__setattr__(
+            self,
+            "discharge",
+            measurement_value(self.discharge, name="discharge"),
+        )
 
 
 class PipelineInitializationPhase(IntEnum):
@@ -206,6 +220,8 @@ class OnlineInflowPipeline:
         """Process one observation and return available outputs."""
 
         self._validate_timestamp(timestamp)
+        storage = measurement_value(storage, name="storage")
+        discharge = measurement_value(discharge, name="discharge")
         if not self.initialized:
             update = self._process_initialization(
                 timestamp=timestamp,
@@ -546,6 +562,7 @@ class OnlineInflowPipeline:
 
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
             raise ValueError("timestamp must be timezone-aware")
+        validate_timestamp_precision(timestamp)
         if self._last_input_timestamp is not None and to_utc(timestamp) <= to_utc(
             self._last_input_timestamp
         ):

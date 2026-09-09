@@ -95,8 +95,14 @@ def _proxy_metrics(
         metrics["proxy_aligned_count"] = int(finite.sum())
         metrics["proxy_gate_passed"] = False
         return metrics
-    interval_seconds = options.proxy_diagnostic_frequency.total_seconds()
-    max_steps = int(np.ceil(options.proxy_max_lag.total_seconds() / interval_seconds))
+    # The diagnostic is sampled on a fixed cadence, so only whole offsets that
+    # remain inside the requested duration are valid.  In particular, a
+    # sub-cadence maximum still permits the zero-lag comparison.
+    diagnostic_frequency = pd.Timedelta(options.proxy_diagnostic_frequency)
+    max_steps = int(
+        pd.Timedelta(options.proxy_max_lag) // diagnostic_frequency
+    )
+    interval_seconds = diagnostic_frequency.total_seconds()
     best: tuple[float, int, float, float, float] | None = None
     for offset in range(-max_steps, max_steps + 1):
         if offset >= 0:
@@ -148,7 +154,10 @@ def _proxy_metrics(
     metrics.update(
         {
             "proxy_aligned_count": int(finite.sum()),
-            "proxy_best_lag_seconds": float(offset * interval_seconds),
+            # ``offset`` is the slice direction used to align the proxy with
+            # the estimate.  Report the equivalent shift applied to the proxy:
+            # positive means the proxy is moved later relative to the estimate.
+            "proxy_best_lag_seconds": float(-offset * interval_seconds),
             "proxy_shape_correlation": float(shape_corr),
             "proxy_change_correlation": float(change_corr),
             "proxy_shape_rmse": float(shape_rmse),

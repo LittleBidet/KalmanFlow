@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from ._validation import covariance_array
+from ._validation import covariance_array, nonempty_string
 from .models import Array
 from .units import UnitSystem
 
@@ -77,8 +77,12 @@ class ReservoirConfig:
             "model_version",
             "configuration_version",
         ):
-            if not str(getattr(self, name)).strip():
-                raise ValueError(f"{name} must not be empty")
+            nonempty_string(getattr(self, name), name=name)
+
+        if not isinstance(self.smoothing_lag, timedelta):
+            raise TypeError("smoothing_lag must be a timedelta")
+        if not isinstance(self.metadata, Mapping):
+            raise TypeError("metadata must be a mapping")
 
         q = covariance_array(self.q, name="q", shape=(3, 3))
         r = covariance_array(
@@ -112,7 +116,5 @@ class ReservoirConfig:
             InitializationStrategy(self.initialization_strategy),
         )
         object.__setattr__(self, "inflow_units", inflow_units)
-        object.__setattr__(
-            self, "metadata", _freeze_metadata(self.metadata)
-        )
+        object.__setattr__(self, "metadata", _freeze_metadata(self.metadata))
         object.__setattr__(self, "unit_system", self.unit_system)

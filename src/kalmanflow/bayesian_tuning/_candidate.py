@@ -58,10 +58,7 @@ def _evaluate_candidate(
         reasons.append(f"filter failed: {error}")
         return _Pass(
             filter_result=None,
-            window_rows={
-                w.name: {"storage_nlpd": np.nan, "storage_count": 0}
-                for w in windows
-            },
+            window_rows={w.name: _failed_window_row(w) for w in windows},
             physical={},
             reasons=reasons,
         )
@@ -180,3 +177,26 @@ def _evaluate_candidate(
         reasons=list(dict.fromkeys(reasons)),
         diagnostics=diagnostics,
     )
+
+
+def _failed_window_row(window: ValidationWindow) -> dict[str, Any]:
+    """Return the same window-row schema as a completed candidate."""
+
+    return {
+        "window": window.name,
+        "start": window.start,
+        "end": window.end,
+        "storage_nlpd": np.nan,
+        "storage_count": 0,
+        "joint_nlpd": np.nan,
+        "joint_count": 0,
+        "joint_nis": np.nan,
+        "storage_nis": np.nan,
+        "outflow_nis": np.nan,
+        "conditional_storage_nis": np.nan,
+        "storage_bias": np.nan,
+        "outflow_bias": np.nan,
+        "conditional_storage_bias": np.nan,
+        "coverage": 0.0,
+        "regularization_count": 0,
+    }

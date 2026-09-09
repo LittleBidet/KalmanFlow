@@ -1,13 +1,15 @@
 from dataclasses import replace
 from datetime import timedelta
 from math import sqrt
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from kalmone import (
+from kalmanflow import (
     BayesianEvaluationSettings,
+    BayesianTuningError,
     BayesianTuningSettings,
     ConfigEvaluationResult,
     InflowUnits,
@@ -18,19 +20,20 @@ from kalmone import (
     evaluate_configuration,
     tune_inflow_noise_bayesian,
 )
-from kalmone.bayesian_tuning import (
+from kalmanflow.bayesian_tuning import (
     _candidate,
     _types,
 )
-from kalmone.bayesian_tuning._diagnostics import (
+from kalmanflow.bayesian_tuning._diagnostics import (
     _aggregate_arrays,
     _elapsed_lag_autocorrelation,
     _marginal_predictive_nlpd,
     _paired_standard_error,
     _storage_conditional_nlpd,
 )
-from kalmone.bayesian_tuning._preparation import _prepare, _validate_windows
-from kalmone.models import ReservoirStateSpaceModel
+from kalmanflow.bayesian_tuning._preparation import _prepare, _validate_windows
+from kalmanflow.bayesian_tuning._proxy import _proxy_metrics
+from kalmanflow.models import ReservoirStateSpaceModel
 
 
 def _config() -> ReservoirConfig:
@@ -164,6 +167,158 @@ def test_elapsed_autocorrelation_regular_cadence_has_expected_pair_counts() -> N
     output = _elapsed_lag_autocorrelation(timestamps, values, timedelta(hours=4))
     assert output["pair_count"].tolist() == [15, 14, 13, 12]
     assert output["autocorrelation"].notna().all()
+
+
+def test_elapsed_autocorrelation_wide_bins_use_pair_normalized_energy() -> None:
+    timestamps = pd.date_range("2025-01-01", periods=100, freq="s", tz="UTC")
+    values = np.sin(np.arange(len(timestamps), dtype=float) / 20.0)
+    output = _elapsed_lag_autocorrelation(
+        timestamps, values, timedelta(seconds=5)
+    )
+
+    centered = values - values.mean()
+    steps = (1, 2, 3)
+    covariance = sum(
+        np.dot(centered[:-step], centered[step:]) for step in steps
+    )
+    source_energy = sum(
+        np.dot(centered[:-step], centered[:-step]) for step in steps
+    )
+    target_energy = sum(
+        np.dot(centered[step:], centered[step:]) for step in steps
+    )
+    expected = covariance / np.sqrt(source_energy * target_energy)
+    row = output.loc[output["lag_seconds"] == 2.0].iloc[0]
+    assert row["pair_count"] == sum(len(values) - step for step in steps)
+    assert row["autocorrelation"] == pytest.approx(expected)
+    assert abs(row["autocorrelation"]) <= 1.0
+
+
+def test_elapsed_autocorrelation_reports_sparse_bins_as_unavailable() -> None:
+    timestamps = pd.date_range("2025-01-01", periods=3, freq="h", tz="UTC")
+    output = _elapsed_lag_autocorrelation(
+        timestamps, [1.0, 2.0, 4.0], timedelta(hours=1)
+    )
+    assert output["pair_count"].tolist() == [2]
+    assert np.isnan(output["autocorrelation"].iloc[0])
+
+
+def test_elapsed_autocorrelation_irregular_missing_matches_pair_oracle() -> None:
+    timestamps = pd.DatetimeIndex(
+        [
+            "2025-01-01T00:00:00Z",
+            "2025-01-01T00:00:01Z",
+            "2025-01-01T00:00:03Z",
+            "2025-01-01T00:00:04Z",
+            "2025-01-01T00:00:07Z",
+            "2025-01-01T00:00:09Z",
+            "2025-01-01T00:00:10Z",
+            "2025-01-01T00:00:13Z",
+        ]
+    )
+    values = np.array([1.0, 2.0, np.nan, 4.0, 5.0, np.nan, 7.0, 8.0])
+    tolerance = timedelta(seconds=1.5)
+    output = _elapsed_lag_autocorrelation(
+        timestamps,
+        values,
+        timedelta(seconds=4),
+        lag_tolerance=tolerance,
+    )
+
+    centre = float(np.nanmean(values))
+    target = 2.0
+    pairs = [
+        (values[left] - centre, values[right] - centre)
+        for left in range(len(values))
+        for right in range(left + 1, len(values))
+        if np.isfinite(values[left])
+        and np.isfinite(values[right])
+        and abs(
+            (timestamps[right] - timestamps[left]).total_seconds() - target
+        )
+        <= tolerance.total_seconds()
+    ]
+    pair_values = np.asarray(pairs)
+    expected = np.dot(pair_values[:, 0], pair_values[:, 1]) / np.sqrt(
+        np.dot(pair_values[:, 0], pair_values[:, 0])
+        * np.dot(pair_values[:, 1], pair_values[:, 1])
+    )
+    row = output.loc[output["lag_seconds"] == target].iloc[0]
+    assert row["pair_count"] == len(pairs)
+    assert row["autocorrelation"] == pytest.approx(expected)
+
+
+def _proxy_metrics_for_delay(
+    delay: int,
+    *,
+    max_lag: timedelta,
+    diagnostic_frequency: str | timedelta = "1h",
+    min_aligned_points: int = 12,
+) -> dict[str, float | bool]:
+    index = pd.date_range("2026-01-01", periods=100, freq="h", tz="UTC")
+    proxy = np.random.default_rng(7).normal(size=len(index))
+    if delay > 0:
+        estimate = np.r_[np.full(delay, np.nan), proxy[:-delay]]
+    elif delay < 0:
+        estimate = np.r_[proxy[-delay:], np.full(-delay, np.nan)]
+    else:
+        estimate = proxy.copy()
+    mask = np.ones(len(index), dtype=bool)
+    return _proxy_metrics(
+        SimpleNamespace(
+            filtered_means=np.column_stack(
+                [np.zeros(len(index)), estimate, np.zeros(len(index))]
+            )
+        ),
+        SimpleNamespace(timestamps=index),
+        pd.Series(proxy, index=index),
+        BayesianTuningSettings(
+            proxy_max_lag=max_lag,
+            proxy_diagnostic_frequency=diagnostic_frequency,
+            proxy_min_aligned_points=min_aligned_points,
+        ),
+        _types._DiagnosticPlan((mask,), mask),
+    )
+
+
+@pytest.mark.parametrize(
+    ("delay", "expected_lag"), [(2, 7200.0), (-2, -7200.0)]
+)
+def test_proxy_lag_reports_shift_of_proxy_with_documented_sign(
+    delay: int, expected_lag: float
+) -> None:
+    metrics = _proxy_metrics_for_delay(delay, max_lag=timedelta(hours=4))
+    assert metrics["proxy_best_lag_seconds"] == expected_lag
+
+
+def test_proxy_lag_never_exceeds_subcadence_or_below_bound_maximum() -> None:
+    subcadence = _proxy_metrics_for_delay(
+        1, max_lag=timedelta(minutes=30), min_aligned_points=12
+    )
+    assert subcadence["proxy_best_lag_seconds"] == 0.0
+
+    # A one-microsecond deficit must not be swallowed by floating-point epsilon.
+    index = pd.date_range("2026-01-01", periods=100 * 24, freq="h", tz="UTC")
+    proxy = np.random.default_rng(4).normal(size=len(index))
+    delay = 20 * 24
+    estimate = np.r_[np.full(delay, np.nan), proxy[:-delay]]
+    mask = np.ones(len(index), dtype=bool)
+    metrics = _proxy_metrics(
+        SimpleNamespace(
+            filtered_means=np.column_stack(
+                [np.zeros(len(index)), estimate, np.zeros(len(index))]
+            )
+        ),
+        SimpleNamespace(timestamps=index),
+        pd.Series(proxy, index=index),
+        BayesianTuningSettings(
+            proxy_max_lag=timedelta(days=20) - timedelta(microseconds=1),
+            proxy_diagnostic_frequency=timedelta(days=20),
+            proxy_min_aligned_points=3,
+        ),
+        _types._DiagnosticPlan((mask,), mask),
+    )
+    assert metrics["proxy_best_lag_seconds"] == 0.0
 
 
 def test_bayesian_tuner_changes_all_five_diagonal_noise_terms() -> None:
@@ -323,6 +478,73 @@ def test_bayesian_first_pass_releases_filter_and_diagnostics(
     assert all(not candidate.diagnostics for candidate in first_passes)
 
 
+def test_failed_trial_is_rejected_and_later_valid_trial_can_be_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage, discharge, windows = _inputs()
+    settings = BayesianEvaluationSettings(
+        warmup=timedelta(0), min_scored_storage_observations=2
+    )
+    search = BayesianTuningSettings(
+        total_trials=3, initial_trials=3, acquisition_pool_size=128
+    )
+    real_filter = _candidate.kalman_filter
+    calls = 0
+
+    def fail_first(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise np.linalg.LinAlgError("injected numerical failure")
+        return real_filter(*args, **kwargs)
+
+    monkeypatch.setattr(_candidate, "kalman_filter", fail_first)
+    result = tune_inflow_noise_bayesian(
+        storage,
+        discharge,
+        _config(),
+        [2.0, 5.0, 10.0],
+        windows,
+        settings=settings,
+        bayesian_settings=search,
+        proposed_configuration_version="config-v2",
+    )
+
+    failed = result.candidate_summary.loc[
+        result.candidate_summary["trial_id"] == 0
+    ].iloc[0]
+    assert not failed["eligible"]
+    assert "filter failed" in failed["rejection_reasons"]
+    assert "joint NLPD" in failed["rejection_reasons"]
+    assert result.candidate_summary["eligible"].sum() == 2
+
+
+def test_all_failed_trials_raise_bayesian_tuning_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage, discharge, windows = _inputs()
+
+    def fail_all(*args, **kwargs):
+        raise np.linalg.LinAlgError("injected numerical failure")
+
+    monkeypatch.setattr(_candidate, "kalman_filter", fail_all)
+    with pytest.raises(BayesianTuningError, match="no candidate passed"):
+        tune_inflow_noise_bayesian(
+            storage,
+            discharge,
+            _config(),
+            [2.0, 5.0, 10.0],
+            windows,
+            settings=BayesianEvaluationSettings(
+                warmup=timedelta(0), min_scored_storage_observations=2
+            ),
+            bayesian_settings=BayesianTuningSettings(
+                total_trials=3, initial_trials=3, acquisition_pool_size=128
+            ),
+            proposed_configuration_version="config-v2",
+        )
+
+
 def test_bayesian_search_improves_known_synthetic_model_objective() -> None:
     base, storage, discharge, windows = _synthetic_config_and_observations()
     settings = BayesianEvaluationSettings(
@@ -385,6 +607,38 @@ def test_bayesian_search_is_reproducible() -> None:
 def test_bayesian_settings_validate_trial_budget() -> None:
     with pytest.raises(ValueError, match="between one and total_trials"):
         BayesianTuningSettings(total_trials=2, initial_trials=3)
+
+
+@pytest.mark.parametrize(
+    ("settings_type", "field", "value"),
+    [
+        (BayesianEvaluationSettings, "min_scored_storage_observations", 3.5),
+        (BayesianEvaluationSettings, "bootstrap_samples", True),
+        (BayesianEvaluationSettings, "random_seed", 1.5),
+        (BayesianEvaluationSettings, "max_regularized_steps", False),
+        (BayesianTuningSettings, "total_trials", 40.5),
+        (BayesianTuningSettings, "initial_trials", True),
+        (BayesianTuningSettings, "random_seed", 1.5),
+        (BayesianTuningSettings, "acquisition_pool_size", 128.5),
+        (BayesianTuningSettings, "proxy_min_aligned_points", np.bool_(False)),
+    ],
+)
+def test_integer_settings_reject_lossy_coercion(
+    settings_type: type, field: str, value: object
+) -> None:
+    with pytest.raises(TypeError, match=f"{field} must be an integer"):
+        settings_type(**{field: value})
+
+
+def test_proxy_gate_requires_a_boolean() -> None:
+    with pytest.raises(TypeError, match="proxy_require_gate must be a bool"):
+        BayesianTuningSettings(proxy_require_gate="false")
+
+
+def test_validation_window_name_must_be_a_string() -> None:
+    index = pd.date_range("2024-01-01", periods=2, freq="1h", tz="UTC")
+    with pytest.raises(TypeError, match="window name must be a string"):
+        ValidationWindow(123, index[0], index[1])
 
 
 def test_bayesian_settings_expose_only_canonical_names() -> None:
@@ -865,3 +1119,41 @@ def test_frozen_configuration_evaluation_is_compact_and_non_mutating() -> None:
     assert len(evaluation.window_diagnostics) == 1
     assert "eligible" in evaluation.candidate_summary
     assert not hasattr(evaluation, "detailed_regime_report")
+
+
+def test_frozen_evaluation_requires_scored_data_before_calibration() -> None:
+    index = pd.date_range("2025-01-01", periods=12, freq="h", tz="UTC")
+    storage = pd.Series(1000.0 + np.arange(len(index)), index=index)
+    discharge = pd.Series(10.0, index=index)
+    evaluation = evaluate_configuration(
+        storage,
+        discharge,
+        _config(),
+        settings=BayesianEvaluationSettings(
+            # Disable calibration thresholds to isolate the hard eligibility gate.
+            nis_warning_range=None,
+            innovation_bias_warning=None,
+        ),
+    )
+
+    summary = evaluation.candidate_summary.iloc[0]
+    assert not summary["eligible"]
+    assert not summary["calibrated"]
+    assert summary["rejection_reasons"]
+    assert any(
+        "scored storage observations" in warning
+        for warning in evaluation.warnings
+    )
+
+
+def test_frozen_evaluation_rejects_submicrosecond_observation_index() -> None:
+    index = pd.DatetimeIndex(
+        [
+            "2025-01-01T00:00:00.000000123Z",
+            "2025-01-01T01:00:00.000000123Z",
+        ]
+    )
+    storage = pd.Series([100.0, 101.0], index=index)
+    discharge = pd.Series([4.0, 4.0], index=index)
+    with pytest.raises(ValueError, match="finer than microsecond"):
+        evaluate_configuration(storage, discharge, _config())

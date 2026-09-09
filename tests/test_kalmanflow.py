@@ -3,9 +3,16 @@ from datetime import UTC, datetime
 
 import numpy as np
 import numpy.testing as npt
+import pandas as pd
 import pytest
 
-from kalmone import FilterStep, kalman_filter, kalman_step, predict_state
+from kalmanflow import (
+    FilterStep,
+    get_reservoir_inflow,
+    kalman_filter,
+    kalman_step,
+    predict_state,
+)
 
 
 def test_kalman_filter_matches_scalar_closed_form_updates() -> None:
@@ -100,3 +107,16 @@ def test_filter_step_rejects_naive_timestamps() -> None:
             predicted_covariance=np.ones((1, 1)),
             transition_matrix=np.ones((1, 1)),
         )
+
+
+def test_batch_rejects_submicrosecond_timestamps() -> None:
+    index = pd.DatetimeIndex(
+        [
+            "2024-01-01T00:00:00.000000123Z",
+            "2024-01-01T00:15:00.000000123Z",
+        ]
+    )
+    storage = pd.Series([100.0, 101.0], index=index)
+    discharge = pd.Series([4.0, 4.1], index=index)
+    with pytest.raises(ValueError, match="finer than microsecond"):
+        get_reservoir_inflow(storage, discharge, 1.0, 1.0, 1.0, 1.0, 1.0)

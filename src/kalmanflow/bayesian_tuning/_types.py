@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .._validation import bounded_integer, nonempty_string
 from ..kalman import KalmanFilterResult
 from ..models import ReservoirStateSpaceModel
 from ..reservoir_config import ReservoirConfig
@@ -44,8 +45,7 @@ class ValidationWindow:
     weight: float | None = None
 
     def __post_init__(self) -> None:
-        if not str(self.name).strip():
-            raise ValueError("window name must not be empty")
+        name = nonempty_string(self.name, name="window name")
         start = _timestamp(self.start, "window start")
         end = _timestamp(self.end, "window end")
         if end <= start:
@@ -55,7 +55,7 @@ class ValidationWindow:
             if not np.isfinite(weight) or weight <= 0.0:
                 raise ValueError("window weight must be positive and finite")
             object.__setattr__(self, "weight", weight)
-        object.__setattr__(self, "name", str(self.name))
+        object.__setattr__(self, "name", name)
         object.__setattr__(self, "start", start)
         object.__setattr__(self, "end", end)
 
@@ -89,15 +89,23 @@ class BayesianEvaluationSettings:
             or self.innovation_max_lag.total_seconds() <= 0.0
         ):
             raise ValueError("innovation_max_lag must be a positive timedelta")
-        if int(self.min_scored_storage_observations) < 1:
-            raise ValueError("min_scored_storage_observations must be positive")
+        minimum_count = bounded_integer(
+            self.min_scored_storage_observations,
+            name="min_scored_storage_observations",
+            minimum=1,
+        )
         practical = float(self.practical_equivalence_tolerance)
         if not np.isfinite(practical) or practical < 0.0:
             raise ValueError("practical_equivalence_tolerance must be nonnegative")
-        if int(self.bootstrap_samples) < 1:
-            raise ValueError("bootstrap_samples must be positive")
-        if int(self.max_regularized_steps) < 0:
-            raise ValueError("max_regularized_steps must be nonnegative")
+        bootstrap_samples = bounded_integer(
+            self.bootstrap_samples, name="bootstrap_samples", minimum=1
+        )
+        random_seed = bounded_integer(
+            self.random_seed, name="random_seed", minimum=0
+        )
+        max_regularized_steps = bounded_integer(
+            self.max_regularized_steps, name="max_regularized_steps", minimum=0
+        )
         jitter = float(self.max_jitter_fraction)
         if not np.isfinite(jitter) or jitter < 0.0:
             raise ValueError("max_jitter_fraction must be nonnegative")
@@ -122,14 +130,14 @@ class BayesianEvaluationSettings:
         object.__setattr__(
             self,
             "min_scored_storage_observations",
-            int(self.min_scored_storage_observations),
+            minimum_count,
         )
         object.__setattr__(self, "practical_equivalence_tolerance", practical)
-        object.__setattr__(self, "bootstrap_samples", int(self.bootstrap_samples))
-        object.__setattr__(self, "random_seed", int(self.random_seed))
+        object.__setattr__(self, "bootstrap_samples", bootstrap_samples)
+        object.__setattr__(self, "random_seed", random_seed)
         object.__setattr__(self, "max_jitter_fraction", jitter)
         object.__setattr__(
-            self, "max_regularized_steps", int(self.max_regularized_steps)
+            self, "max_regularized_steps", max_regularized_steps
         )
 
 
@@ -215,15 +223,18 @@ class BayesianTuningSettings:
     proxy_require_gate: bool = True
 
     def __post_init__(self) -> None:
-        total = int(self.total_trials)
-        initial = int(self.initial_trials)
-        if total < 1:
-            raise ValueError("total_trials must be positive")
-        if initial < 1 or initial > total:
+        total = bounded_integer(self.total_trials, name="total_trials", minimum=1)
+        initial = bounded_integer(
+            self.initial_trials, name="initial_trials", minimum=1
+        )
+        if initial > total:
             raise ValueError("initial_trials must be between one and total_trials")
+        random_seed = bounded_integer(
+            self.random_seed, name="random_seed", minimum=0
+        )
         object.__setattr__(self, "total_trials", total)
         object.__setattr__(self, "initial_trials", initial)
-        object.__setattr__(self, "random_seed", int(self.random_seed))
+        object.__setattr__(self, "random_seed", random_seed)
         for name in (
             "q_storage_multiplier_bounds",
             "q_outflow_multiplier_bounds",
@@ -245,13 +256,19 @@ class BayesianTuningSettings:
         autocorrelation = float(self.max_abs_elapsed_lag_autocorrelation)
         if not np.isfinite(autocorrelation) or autocorrelation < 0.0:
             raise ValueError("max_abs_elapsed_lag_autocorrelation must be nonnegative")
-        if int(self.acquisition_pool_size) < 128:
-            raise ValueError("acquisition_pool_size must be at least 128")
+        acquisition_pool_size = bounded_integer(
+            self.acquisition_pool_size,
+            name="acquisition_pool_size",
+            minimum=128,
+        )
         xi = float(self.expected_improvement_xi)
         if not np.isfinite(xi) or xi < 0.0:
             raise ValueError("expected_improvement_xi must be nonnegative")
-        if int(self.proxy_min_aligned_points) < 3:
-            raise ValueError("proxy_min_aligned_points must be at least 3")
+        proxy_min_aligned_points = bounded_integer(
+            self.proxy_min_aligned_points,
+            name="proxy_min_aligned_points",
+            minimum=3,
+        )
         invalid_proxy_lag = not isinstance(self.proxy_max_lag, timedelta) or (
             self.proxy_max_lag < timedelta(0)
         )
@@ -271,19 +288,21 @@ class BayesianTuningSettings:
         shape_rmse = float(self.proxy_max_shape_rmse)
         if not np.isfinite(shape_rmse) or shape_rmse < 0.0:
             raise ValueError("proxy_max_shape_rmse must be nonnegative and finite")
+        if not isinstance(self.proxy_require_gate, bool):
+            raise TypeError("proxy_require_gate must be a bool")
         object.__setattr__(self, "one_standard_error_weight", weight)
         object.__setattr__(self, "max_abs_elapsed_lag_autocorrelation", autocorrelation)
         object.__setattr__(
-            self, "acquisition_pool_size", int(self.acquisition_pool_size)
+            self, "acquisition_pool_size", acquisition_pool_size
         )
         object.__setattr__(self, "expected_improvement_xi", xi)
         object.__setattr__(
-            self, "proxy_min_aligned_points", int(self.proxy_min_aligned_points)
+            self, "proxy_min_aligned_points", proxy_min_aligned_points
         )
         object.__setattr__(self, "proxy_max_lag", self.proxy_max_lag)
         object.__setattr__(self, "proxy_diagnostic_frequency", proxy_frequency)
         object.__setattr__(self, "proxy_max_shape_rmse", shape_rmse)
-        object.__setattr__(self, "proxy_require_gate", bool(self.proxy_require_gate))
+        object.__setattr__(self, "proxy_require_gate", self.proxy_require_gate)
 
 
 @dataclass(frozen=True)

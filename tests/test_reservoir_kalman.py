@@ -5,7 +5,7 @@ import numpy.testing as npt
 import pandas as pd
 import pytest
 
-from kalmone import (
+from kalmanflow import (
     InflowUnits,
     InitializationStrategy,
     Observation,
@@ -294,7 +294,48 @@ def test_get_reservoir_inflow_reports_cfs_for_ten_minute_samples() -> None:
         smoothing_lag=timedelta(hours=1),
     )
 
-    assert result.loc[index[0], "estimated_inflow"] == pytest.approx(expected_rate)
+    assert result.loc[index[0], "estimated_inflow"] == pytest.approx(outflow_rate)
+    assert result.loc[index[1], "estimated_inflow"] == pytest.approx(expected_rate)
+
+
+@pytest.mark.parametrize("column", ["storage", "outflow"])
+def test_batch_rejects_infinity_instead_of_treating_it_as_missing(
+    column: str,
+) -> None:
+    index = pd.date_range("2024-01-01", periods=3, freq="10min", tz="UTC")
+    storage = pd.Series([100.0, 101.0, 102.0], index=index)
+    outflow = pd.Series([4.0, 4.0, 4.0], index=index)
+    (storage if column == "storage" else outflow).iloc[1] = np.inf
+
+    input_name = "storage" if column == "storage" else "discharge"
+    with pytest.raises(ValueError, match=f"{input_name}.*finite values or NaN"):
+        get_reservoir_inflow(
+            storage,
+            outflow,
+            q_storage=0.1,
+            q_inflow=0.1,
+            q_outflow=0.1,
+            r_storage=0.25,
+            r_outflow=0.5,
+        )
+
+
+def test_stream_rejects_infinity_before_mutating_state() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    stream = OnlineReservoirInflow(
+        q_storage=0.1,
+        q_inflow=0.1,
+        q_outflow=0.1,
+        r_storage=0.25,
+        r_outflow=0.5,
+    )
+
+    with pytest.raises(ValueError, match="storage must be finite or NaN"):
+        stream.process(timestamp=start, storage=np.inf, discharge=4.0)
+    assert stream.initialized is False
+    assert stream.process(
+        timestamp=start, storage=100.0, discharge=4.0
+    ).filtered_inflows == ()
 
 
 def test_noisy_outflow_measurements_inform_smoothed_inflow() -> None:

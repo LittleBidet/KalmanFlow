@@ -831,12 +831,16 @@ wheels = [
 ]
 
 [[package]]
-name = "kalmone"
+name = "kalmanflow"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
     { name = "pandas" },
+]
+
+[package.optional-dependencies]
+tuning = [
     { name = "scikit-learn" },
     { name = "scipy" },
 ]
@@ -856,9 +860,10 @@ notebook = [
 requires-dist = [
     { name = "numpy", specifier = ">=2.4.6" },
     { name = "pandas", specifier = ">=3.0.5" },
-    { name = "scikit-learn", specifier = ">=1.9.0" },
-    { name = "scipy", specifier = ">=1.18.1" },
+    { name = "scikit-learn", marker = "extra == 'tuning'", specifier = ">=1.9.0" },
+    { name = "scipy", marker = "extra == 'tuning'", specifier = ">=1.18.1" },
 ]
+provides-extras = ["tuning"]
 
 [package.metadata.requires-dev]
 dev = [

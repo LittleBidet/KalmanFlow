@@ -8,11 +8,13 @@ import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from kalmone import (
+from kalmanflow import (
     InflowUnits,
     InitializationStrategy,
     Observation,
@@ -146,7 +148,7 @@ from pathlib import Path
 
 import numpy as np
 
-from kalmone import (
+from kalmanflow import (
     InflowUnits,
     InitializationStrategy,
     Observation,
@@ -549,6 +551,61 @@ def test_checkpoint_format_version_and_size_are_compact(
     unsupported = bytes([255]) + checkpoint[1:]
     with pytest.raises(ValueError, match="unsupported.*format version"):
         OnlineReservoirInflow.from_checkpoint(unsupported, config=config)
+
+
+def test_checkpoint_preserves_microsecond_timestamp_and_rejects_finer_input() -> None:
+    config = _config()
+    submicrosecond_timestamp = pd.Timestamp("2024-01-01T00:00:00.000001123Z")
+    with pytest.raises(ValueError, match="finer than microsecond"):
+        Observation(submicrosecond_timestamp, 100.0, 4.0)
+
+    stream = OnlineReservoirInflow.from_config(config)
+    microsecond_timestamp = pd.Timestamp("2024-01-01T00:00:00.000001Z")
+    stream.process(
+        timestamp=microsecond_timestamp,
+        storage=100.0,
+        discharge=4.0,
+    )
+    restored = OnlineReservoirInflow.from_checkpoint(
+        stream.checkpoint(), config=config
+    )
+    assert (
+        pd.Timestamp(restored._pipeline.last_input_timestamp)
+        == microsecond_timestamp
+    )
+
+    submicrosecond_timestamp = pd.Timestamp("2024-01-01T00:15:00.000001123Z")
+    with pytest.raises(ValueError, match="finer than microsecond"):
+        stream.process(
+            timestamp=submicrosecond_timestamp,
+            storage=101.0,
+            discharge=4.1,
+        )
+    assert stream._pipeline.last_input_timestamp == microsecond_timestamp
+
+
+def test_process_many_rejects_submicrosecond_input_before_mutating_stream() -> None:
+    config = _config()
+    observations = _observations(count=4)
+    stream = OnlineReservoirInflow.from_config(config)
+    stream.process(observations[0])
+    before = stream._pipeline.last_input_timestamp
+
+    with pytest.raises(ValueError, match="finer than microsecond"):
+        stream.process_many(
+            [
+                observations[1],
+                SimpleNamespace(
+                    timestamp=pd.Timestamp("2024-01-01T00:30:00.000000123Z"),
+                    storage=102.0,
+                    discharge=4.2,
+                ),
+                observations[3],
+            ]
+        )
+
+    assert not stream.initialized
+    assert stream._pipeline.last_input_timestamp == before
 
 
 def test_batch_apis_remain_checkpoint_free() -> None:

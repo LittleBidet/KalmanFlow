@@ -13,6 +13,23 @@ def to_utc(timestamp: datetime) -> datetime:
     return timestamp.astimezone(UTC)
 
 
+def validate_timestamp_precision(timestamp: datetime) -> None:
+    """Reject timestamp values finer than the checkpoint's public precision.
+
+    Python ``datetime`` values are microsecond-precise.  Pandas timestamps can
+    carry an additional nanosecond remainder, which the compact checkpoint
+    format cannot represent without changing the public timestamp type.  Keep
+    that precision loss from occurring by rejecting such values at every
+    observation and state boundary.
+    """
+
+    nanosecond_remainder = int(getattr(timestamp, "nanosecond", 0))
+    if nanosecond_remainder:
+        raise ValueError(
+            "timestamps finer than microsecond precision are not supported"
+        )
+
+
 def elapsed_seconds(
     later: datetime, earlier: datetime, *, allow_zero: bool = False
 ) -> float:

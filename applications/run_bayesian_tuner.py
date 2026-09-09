@@ -24,7 +24,7 @@ from applications.preparation import (  # noqa: E402
     prepare_reservoir_data,
     sources_for_reservoir,
 )
-from kalmone import (  # noqa: E402
+from kalmanflow import (  # noqa: E402
     BayesianEvaluationSettings,
     BayesianTuningResult,
     BayesianTuningSettings,

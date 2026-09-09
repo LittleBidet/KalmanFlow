@@ -1,10 +1,10 @@
-# Kalmone model behavior
+# KalmanFlow model behavior
 
 ## Input contract
 
-`get_reservoir_inflow` and `get_reservoir_inflow_from_config` accept pre-cleaned storage and discharge `pandas.Series` with exactly equal, timezone-aware, strictly increasing indexes. The default adapter expects storage in acre-feet and discharge in cfs. The configured adapter uses the labels in `ReservoirConfig.unit_system`.
+`get_reservoir_inflow` and `get_reservoir_inflow_from_config` accept pre-cleaned storage and discharge `pandas.Series` with exactly equal, timezone-aware, strictly increasing indexes. Observation timestamps support microsecond precision; finer pandas timestamps are rejected before computation. The default adapter expects storage in acre-feet and discharge in cfs. The configured adapter uses the labels in `ReservoirConfig.unit_system`.
 
-`OnlineReservoirInflow.process` accepts either an `Observation` or `timestamp`, `storage`, and `discharge` keywords. Timestamps must be timezone-aware and strictly later than the previously accepted observation. All elapsed-time comparisons are normalized to UTC.
+`OnlineReservoirInflow.process` accepts either an `Observation` or `timestamp`, `storage`, and `discharge` keywords. Timestamps must be timezone-aware, no finer than microseconds, and strictly later than the previously accepted observation. All elapsed-time comparisons are normalized to UTC. Validation-window boundaries may retain nanosecond precision because they are interval labels rather than observations.
 
 The package intentionally does not sort, align, deduplicate, interpolate, or impute inputs.
 
@@ -13,11 +13,14 @@ The package intentionally does not sort, align, deduplicate, interpolate, or imp
 The stream ignores leading rows with missing storage. Its first finite storage
 reading must also have finite discharge; that row becomes the initialization
 anchor. The next finite storage reading completes initialization, even if its
-discharge is missing. The first inflow rate is calculated with the water
-balance over those two storage samples. A finite storage row with missing
-discharge before an anchor is therefore invalid rather than silently skipped.
+discharge is missing. At the anchor timestamp, the model uses measured outflow
+as a steady-state inflow prior (zero initial storage-change assumption). That
+first filtered value therefore depends only on the anchor observation, not on
+the later storage reading. The second storage reading then updates inflow
+through the normal causal predict/update step. A finite storage row with
+missing discharge before an anchor is invalid rather than silently skipped.
 
-After initialization, either storage or discharge may be `NaN`. A finite component is still used as a partial Kalman observation. If both are `NaN`, the step is predict-only. A public estimate carrying any missing observation component receives the `PREDICTED` flag; fully observed steps are `NORMAL`.
+After initialization, either storage or discharge may be `NaN`. A finite component is still used as a partial Kalman observation. If both are `NaN`, the step is predict-only. Positive and negative infinity are invalid; `NaN` is the only missing-value marker. A public estimate carrying any missing observation component receives the `PREDICTED` flag; fully observed steps are `NORMAL`.
 
 ## Batch outputs
 
@@ -43,6 +46,15 @@ Each call to `OnlineReservoirInflow.process` returns a `ReservoirFlowUpdate`.
 replacements at their original timestamps. The initial successful call that
 completes initialization can emit two filtered inflow estimates. The active
 smoothing window is retained internally and is bounded by `max_window_steps`.
+Although both startup estimates are emitted together, the anchor estimate was
+computed from the anchor observation alone.
+
+The anchor state mean is seeded from the anchor storage and measured outflow,
+then that same anchor observation is assimilated by the filter. Its innovation
+is therefore zero by construction and the covariance can be reduced. This startup
+covariance is an engineering approximation rather than a measurement-
+conditioned uncertainty calibration; interpret early uncertainty and early
+calibration diagnostics accordingly.
 
 `process_many` is transactional: if any item is invalid, the stream returns to its entry state and produces no partial group result.
 

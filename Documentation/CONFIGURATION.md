@@ -9,7 +9,7 @@ from datetime import timedelta
 
 import numpy as np
 
-from kalmone import (
+from kalmanflow import (
     InflowUnits,
     InitializationStrategy,
     ReservoirConfig,
@@ -35,7 +35,7 @@ config = ReservoirConfig(
 Then pass it to either adapter:
 
 ```python
-from kalmone import OnlineReservoirInflow, get_reservoir_inflow_from_config
+from kalmanflow import OnlineReservoirInflow, get_reservoir_inflow_from_config
 
 stream = OnlineReservoirInflow.from_config(config)
 batch_result = get_reservoir_inflow_from_config(storage, discharge, config)
@@ -52,11 +52,19 @@ The state order is `[storage, inflow_rate, true_outflow_rate]`.
 
 | Field | Shape | Meaning |
 | --- | --- | --- |
-| `q` | 3×3 | Continuous-time process-diffusion covariance in state units. |
-| `r` | 2×2 | Measurement covariance for `[storage, measured_outflow]`. |
-| `p0` | 3×3 | Initial covariance in state units. |
+| `q` | 3×3 | Continuous-time process-diffusion covariance; `q[i,j]` has units `state_i × state_j / second`. |
+| `r` | 2×2 | Measurement covariance for `[storage, measured_outflow]`; `r[i,j]` has units `observation_i × observation_j`. |
+| `p0` | 3×3 | Initial covariance; `p0[i,j]` has units `state_i × state_j`. |
 
-All covariance matrices must be finite, symmetric, and positive semidefinite. The two diagonal elements of `r` must be strictly positive. Kalmone derives each discrete process covariance from `q` and the actual elapsed time between observations, so never reuse a discrete, fixed-interval Q matrix as `q`.
+All covariance matrices must be finite, symmetric, and positive semidefinite. The two diagonal elements of `r` must be strictly positive. KalmanFlow derives each discrete process covariance from `q` and the actual elapsed time between observations, so never reuse a discrete, fixed-interval Q matrix as `q`.
+
+The balance model infers a net storage balance contribution. Measured outflow
+should include outlet releases, spills, and outward diversions or withdrawals
+as applicable. Precipitation, evaporation, seepage, and other water exchanges
+are not separate model terms; account for them with separate justified inputs
+or document them as model mismatch. Sensor bias, storage-datum changes, and
+rating-curve changes are additional mismatch sources. Estimates are not
+constrained to be nonnegative.
 
 `UnitSystem.us_customary()` uses acre-feet and cfs; `UnitSystem.si()` uses m³ and m³/s. A custom `UnitSystem` must supply a positive `flow_to_volume_per_second` conversion that matches the storage unit.
 

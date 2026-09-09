@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from kalmone.units import CFS_TO_ACRE_FEET_PER_SECOND
+from kalmanflow.units import CFS_TO_ACRE_FEET_PER_SECOND
 
 _ESTIMATE_COLUMNS = (
     "raw_inflow",

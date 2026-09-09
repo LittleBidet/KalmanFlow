@@ -50,19 +50,18 @@ class ReservoirBackend:
         """Create the first two filter steps from the starting observations."""
 
         interval_seconds = elapsed_seconds(second.timestamp, first.timestamp)
-        initial_inflow = self.model.initial_inflow(
-            first.storage,
-            second.storage,
-            first.discharge,
-            interval_seconds,
-        )
+        # A storage derivative cannot be known at ``first.timestamp`` without
+        # looking ahead. Use the measured outflow as a steady-state inflow
+        # prior so this first filtered state depends only on information that
+        # was available at its own timestamp.
+        initial_outflow = self.model.initial_outflow(first.discharge)
         first_step = initial_filter_step(
             timestamp=first.timestamp,
             initial_mean=np.array(
                 [
                     first.storage,
-                    initial_inflow,
-                    self.model.initial_outflow(first.discharge),
+                    initial_outflow,
+                    initial_outflow,
                 ]
             ),
             initial_covariance=self.initial_covariance,

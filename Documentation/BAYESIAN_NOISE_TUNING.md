@@ -1,4 +1,13 @@
-# Bayesian innovation noise tuning
+# Experimental Bayesian innovation noise tuning
+
+Bayesian tuning is experimental. Its API, selection rules, and result schema
+may change between releases. Treat selected settings as proposals requiring
+independent validation before operational use.
+
+Install the optional search dependencies with `pip install "kalmanflow[tuning]"`.
+The optimizer loads only when `tune_inflow_noise_bayesian` is called. Importing
+KalmanFlow, filtering, smoothing, and `evaluate_configuration` work with the base
+installation. Existing package-level imports remain supported.
 
 ## Scope and inputs
 
@@ -41,6 +50,21 @@ insufficiently scored trials. Statistically competitive trials are identified
 with paired window differences; final selection prefers lower calibration
 violation, then proximity to the reviewed base configuration, then objective.
 
+`eligible` and `calibrated` answer different questions in both search and frozen
+evaluation. An eligible result has the required number of finite scored storage
+observations in every window and finite joint NLPD values. A search result is
+calibrated only when it is eligible and satisfies the configured NIS,
+innovation-bias, and autocorrelation checks. Frozen evaluation reports
+calibrated only when it is eligible and has no configured NIS or innovation-bias
+warnings; the search-only autocorrelation threshold is not applied by
+`evaluate_configuration`. Disabling calibration warning thresholds does not
+make an empty or numerically invalid evaluation eligible or calibrated.
+
+The elapsed-time autocorrelation diagnostic centers the finite innovations and
+normalizes each tolerance bin with the energy of the actual paired values. A
+bin with fewer than three finite pairs is reported as unavailable rather than
+being used as a calibration pass.
+
 ## Output files and held-out evaluation
 
 The runner writes the proposed immutable `ReservoirConfig` to `output_path`.
@@ -77,7 +101,7 @@ An upstream gauge may be supplied as an optional diagnostic proxy:
 ```python
 from datetime import timedelta
 
-from kalmone import (
+from kalmanflow import (
     BayesianEvaluationSettings,
     BayesianTuningSettings,
     tune_inflow_noise_bayesian,
@@ -106,8 +130,11 @@ result = tune_inflow_noise_bayesian(
 Proxy checks first match the gauge to the model timestamps, then perform a
 bounded lag search using standardized level and change shape. They use only
 the warmup-adjusted validation rows and aggregate at an hourly cadence by
-default. They report best lag, level/change correlation, normalized shape
-RMSE, and a gate flag in the result and JSON report. Proxy magnitude is
+default. Only whole diagnostic-cadence shifts whose duration is within
+`proxy_max_lag` are considered, while zero lag remains available for a
+sub-cadence maximum. A positive reported lag means the proxy is shifted later
+relative to the causal estimate. They report best lag, level/change correlation,
+normalized shape RMSE, and a gate flag in the result and JSON report. Proxy magnitude is
 deliberately not matched and the proxy is never added to the Kalman observation
 vector or treated as true total inflow. If at least one innovation-valid trial
 passes the configured gate, selection is restricted to those trials; if none
@@ -129,7 +156,7 @@ for existing notebooks.
 Run the workflow from the project root:
 
 ```bash
-uv run python applications/run_bayesian_tuner.py
+uv run --extra tuning python applications/run_bayesian_tuner.py
 ```
 
 Direct execution uses the reviewed constants near the top of the runner;
@@ -155,7 +182,7 @@ run_bayesian_tuner(
 The package API is:
 
 ```python
-from kalmone import (
+from kalmanflow import (
     BayesianEvaluationSettings,
     BayesianTuningSettings,
     ValidationWindow,

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import isfinite
 
+from ._validation import nonempty_string
+
 # US customary: 1 cfs for 1 second = 1/43560 acre-ft.
 CFS_TO_ACRE_FEET_PER_SECOND = 1.0 / 43560.0
 
@@ -22,10 +24,8 @@ class UnitSystem:
     flow_to_volume_per_second: float = CFS_TO_ACRE_FEET_PER_SECOND
 
     def __post_init__(self) -> None:
-        if not str(self.volume_label).strip():
-            raise ValueError("volume_label must not be empty")
-        if not str(self.flow_label).strip():
-            raise ValueError("flow_label must not be empty")
+        nonempty_string(self.volume_label, name="volume_label")
+        nonempty_string(self.flow_label, name="flow_label")
         factor = float(self.flow_to_volume_per_second)
         if not isfinite(factor) or factor <= 0.0:
             raise ValueError("flow_to_volume_per_second must be positive and finite")

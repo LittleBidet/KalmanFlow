@@ -7,6 +7,7 @@ import pandas as pd
 
 from ..models import ReservoirStateSpaceModel
 from ..reservoir_config import ReservoirConfig
+from ..time_utils import validate_timestamp_precision
 from ._types import (
     BayesianEvaluationSettings,
     BayesianTuningError,
@@ -23,6 +24,8 @@ def _validate_index(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
         raise ValueError("storage and discharge indexes must be DatetimeIndex")
     if index.tz is None:
         raise ValueError("storage and discharge indexes must be timezone-aware")
+    for timestamp in index:
+        validate_timestamp_precision(timestamp)
     if (
         len(index) < 2
         or index.hasnans
@@ -119,6 +122,10 @@ def _prepare(
     index = _validate_index(storage.index)
     storage_values = storage.to_numpy(dtype=float, copy=True)
     discharge_values = discharge.to_numpy(dtype=float, copy=True)
+    if np.isinf(storage_values).any():
+        raise ValueError("storage must contain only finite values or NaN")
+    if np.isinf(discharge_values).any():
+        raise ValueError("discharge must contain only finite values or NaN")
     q = np.asarray(config.q, dtype=float)
     r = np.asarray(config.r, dtype=float)
     p0 = np.asarray(config.p0, dtype=float)
@@ -162,12 +169,7 @@ def _prepare(
     initial_mean = np.array(
         [
             storage_values[first],
-            model.initial_inflow(
-                storage_values[first],
-                storage_values[second],
-                discharge_values[first],
-                elapsed[0],
-            ),
+            model.initial_outflow(discharge_values[first]),
             model.initial_outflow(discharge_values[first]),
         ],
         dtype=float,

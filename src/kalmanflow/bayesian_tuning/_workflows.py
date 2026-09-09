@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from ..reservoir_config import ReservoirConfig
-from . import _candidate, _diagnostics, _optimization, _preparation, _proxy, _types
+from . import _candidate, _diagnostics, _preparation, _proxy, _types
 
 BayesianEvaluationSettings = _types.BayesianEvaluationSettings
 BayesianTuningError = _types.BayesianTuningError
@@ -61,6 +61,67 @@ def _calibration_violation(
         limit = max(options.max_abs_elapsed_lag_autocorrelation, 1e-12)
         violation += ((autocorrelation - limit) / limit) ** 2
     return float(violation), calibrated
+
+
+def _hard_validity(
+    candidate: Any,
+    windows: Sequence[ValidationWindow],
+    settings: BayesianEvaluationSettings,
+) -> tuple[bool, list[str]]:
+    """Apply the numerical gates shared by search and frozen evaluation."""
+
+    reasons = list(candidate.reasons)
+    for window in windows:
+        row = candidate.window_rows.get(window.name, {})
+        try:
+            storage_count = int(row.get("storage_count", 0))
+        except (TypeError, ValueError):
+            storage_count = 0
+        if storage_count < settings.min_scored_storage_observations:
+            reasons.append(
+                f"window {window.name!r} has {storage_count} scored storage "
+                "observations; "
+                f"at least {settings.min_scored_storage_observations} are required"
+            )
+        try:
+            joint_loss = float(row.get("joint_nlpd", np.nan))
+        except (TypeError, ValueError):
+            joint_loss = np.nan
+        if not np.isfinite(joint_loss):
+            reasons.append(f"window {window.name!r} has no finite joint NLPD")
+    unique_reasons = list(dict.fromkeys(reasons))
+    return not unique_reasons, unique_reasons
+
+
+def _calibration_warnings(
+    physical: Mapping[str, float], settings: BayesianEvaluationSettings
+) -> tuple[str, ...]:
+    """Describe configured calibration threshold failures for frozen reports."""
+
+    warnings: list[str] = []
+    if settings.nis_warning_range is not None:
+        low, high = settings.nis_warning_range
+        for name in ("joint_nis", "storage_nis", "outflow_nis"):
+            value = float(physical.get(name, np.nan))
+            if not np.isfinite(value):
+                warnings.append(f"{name} is unavailable for calibration")
+            elif value < low or value > high:
+                warnings.append(
+                    f"{name}={value:.6g} is outside the configured "
+                    f"warning range [{low:g}, {high:g}]"
+                )
+    if settings.innovation_bias_warning is not None:
+        limit = float(settings.innovation_bias_warning)
+        for name in ("storage_bias", "outflow_bias", "conditional_storage_bias"):
+            value = float(physical.get(name, np.nan))
+            if not np.isfinite(value):
+                warnings.append(f"{name} is unavailable for calibration")
+            elif abs(value) > limit:
+                warnings.append(
+                    f"{name}={value:.6g} exceeds the configured absolute "
+                    f"warning limit {limit:g}"
+                )
+    return tuple(warnings)
 
 
 def _proposed_config(
@@ -122,7 +183,23 @@ def tune_inflow_noise_bayesian(
     upstream_proxy: pd.Series | None = None,
     proposed_configuration_version: str | None = None,
 ) -> BayesianTuningResult:
-    """Tune diagonal ``Q`` and ``R`` using causal innovation NLPD."""
+    """Experimentally tune diagonal ``Q`` and ``R`` using causal innovation NLPD.
+
+    Requires the optional ``kalmanflow[tuning]`` dependencies. The search API,
+    selection rules, and result schema may change between releases. Proposals
+    require independent validation before operational use.
+    """
+
+    # Keep filtering and frozen evaluation usable without the optimizer stack.
+    try:
+        from . import _optimization
+    except ModuleNotFoundError as error:
+        if error.name not in {"scipy", "sklearn"}:
+            raise
+        raise ImportError(
+            "Experimental Bayesian tuning requires optional dependencies. "
+            "Install them with: pip install 'kalmanflow[tuning]'"
+        ) from error
 
     options = settings or BayesianEvaluationSettings()
     search = bayesian_settings or BayesianTuningSettings()
@@ -228,17 +305,10 @@ def tune_inflow_noise_bayesian(
         ):
             violation += 1.0
         losses = np.asarray(
-            [candidate.window_rows[w.name]["joint_nlpd"] for w in windows], dtype=float
+            [candidate.window_rows[w.name].get("joint_nlpd", np.nan) for w in windows],
+            dtype=float,
         )
-        valid = (
-            not candidate.reasons
-            and np.isfinite(losses).all()
-            and all(
-                candidate.window_rows[w.name]["storage_count"]
-                >= options.min_scored_storage_observations
-                for w in windows
-            )
-        )
+        valid, validity_reasons = _hard_validity(candidate, windows, options)
         mean_loss = float(np.dot(weights, losses)) if valid else np.inf
         standard_error = (
             _optimization._weighted_standard_error(losses, weights) if valid else np.inf
@@ -248,9 +318,7 @@ def tune_inflow_noise_bayesian(
             if valid
             else np.inf
         )
-        rejection = "; ".join(candidate.reasons)
-        if not valid and not rejection:
-            rejection = "failed hard validity gates"
+        rejection = "; ".join(validity_reasons)
         row = {
             "trial_id": trial_id,
             **parameters,
@@ -260,7 +328,7 @@ def tune_inflow_noise_bayesian(
             "window_standard_error": standard_error,
             "robust_objective": robust_objective,
             "calibration_violation": violation,
-            "calibrated": calibrated,
+            "calibrated": valid and calibrated,
             "eligible": valid,
             "rejection_reasons": rejection,
             "max_elapsed_lag_autocorrelation": candidate.physical.get(
@@ -524,6 +592,8 @@ def evaluate_configuration(
         settings=options,
         plan=_preparation._diagnostic_plan(prepared, windows, options),
     )
+    eligible, validity_reasons = _hard_validity(candidate, windows, options)
+    calibration_warnings = _calibration_warnings(candidate.physical, options)
     window_frame = pd.DataFrame(
         [
             {
@@ -543,8 +613,9 @@ def evaluate_configuration(
                 "q_outflow": float(config.q[2, 2]),
                 "r_storage": float(config.r[0, 0]),
                 "r_outflow": float(config.r[1, 1]),
-                "eligible": not candidate.reasons,
-                "rejection_reasons": "; ".join(candidate.reasons),
+                "eligible": eligible,
+                "calibrated": eligible and not calibration_warnings,
+                "rejection_reasons": "; ".join(validity_reasons),
                 **candidate.physical,
             }
         ]
@@ -553,7 +624,7 @@ def evaluate_configuration(
         config=config,
         candidate_summary=summary,
         window_diagnostics=window_frame,
-        warnings=tuple(candidate.reasons),
+        warnings=tuple(dict.fromkeys((*validity_reasons, *calibration_warnings))),
     )
 
 

@@ -12,7 +12,7 @@ import numpy as np
 from ._validation import bounded_integer, readonly_array
 from .flags import OutputFlag
 from .kalman import Array, FilterStep, _solve_right, _symmetrize
-from .time_utils import elapsed_seconds, to_utc
+from .time_utils import elapsed_seconds, to_utc, validate_timestamp_precision
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,11 @@ class SmoothedStep:
     smoothing_flag: OutputFlag = OutputFlag.SMOOTHED
 
     def __post_init__(self) -> None:
+        if not isinstance(self.timestamp, datetime):
+            raise TypeError("timestamp must be a datetime instance")
+        if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
+            raise ValueError("timestamp must be timezone-aware")
+        validate_timestamp_precision(self.timestamp)
         prediction_flag = OutputFlag(self.prediction_flag)
         if prediction_flag not in {OutputFlag.NORMAL, OutputFlag.PREDICTED}:
             raise ValueError("SmoothedStep prediction_flag must be NORMAL or PREDICTED")

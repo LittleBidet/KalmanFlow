@@ -48,7 +48,7 @@ from .rts import OnlineFixedLagRTS, SmoothedStep, smooth_filter_steps
 from .units import CFS_TO_ACRE_FEET_PER_SECOND, UnitSystem
 
 try:
-    __version__ = version("kalmone")
+    __version__ = version("kalmanflow")
 except PackageNotFoundError:
     __version__ = "0.1.0"
 

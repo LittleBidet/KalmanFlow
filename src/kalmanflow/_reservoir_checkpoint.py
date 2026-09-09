@@ -16,7 +16,7 @@ from .pipeline import (
     PipelineInitializationPhase,
     PipelineState,
 )
-from .time_utils import to_utc
+from .time_utils import to_utc, validate_timestamp_precision
 
 _FORMAT_VERSION = 3
 _CONFIGURATION_FINGERPRINT_SIZE = 32
@@ -306,6 +306,7 @@ def _unpack_timestamp(reader: _Reader) -> datetime:
 def _timestamp_to_microseconds(timestamp: datetime) -> int:
     """Convert an aware datetime to an exact UTC microsecond count."""
 
+    validate_timestamp_precision(timestamp)
     return (to_utc(timestamp) - _EPOCH) // _MICROSECOND
 
 

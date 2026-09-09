@@ -1,1 +1,1 @@
-"""Offline, repository-specific workflows built on top of :mod:`kalmone`."""
+"""Offline, repository-specific workflows built on top of :mod:`kalmanflow`."""

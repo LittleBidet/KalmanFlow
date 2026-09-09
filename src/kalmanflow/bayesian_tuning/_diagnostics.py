@@ -98,9 +98,6 @@ def _elapsed_lag_autocorrelation(
         )
     finite_values = series[finite]
     centre = float(np.mean(finite_values))
-    variance = float(np.sum((finite_values - centre) ** 2))
-    if variance <= 0.0:
-        variance = np.nan
     tick_differences = np.diff(index.asi8)
     regular = len(seconds) > 2 and np.all(tick_differences == tick_differences[0])
     if regular and finite.all():
@@ -109,6 +106,10 @@ def _elapsed_lag_autocorrelation(
         convolution = np.fft.irfft(
             np.fft.rfft(centred, size) * np.conjugate(np.fft.rfft(centred, size)),
             size,
+        )
+        squared = centred * centred
+        cumulative_energy = np.concatenate(
+            (np.array([0.0]), np.cumsum(squared, dtype=float))
         )
         rows: list[dict[str, float | int]] = []
         for target in targets:
@@ -119,13 +120,36 @@ def _elapsed_lag_autocorrelation(
             )
             steps = np.arange(lower, upper + 1, dtype=int)
             pairs = int(np.sum(len(centred) - steps)) if len(steps) else 0
-            covariance = float(np.sum(convolution[steps])) if len(steps) else np.nan
+            covariance = float(np.sum(convolution[steps])) if len(steps) else 0.0
+            source_energy = (
+                float(
+                    sum(
+                        cumulative_energy[len(centred) - int(step)]
+                        for step in steps
+                    )
+                )
+                if len(steps)
+                else 0.0
+            )
+            target_energy = (
+                float(
+                    sum(
+                        cumulative_energy[-1] - cumulative_energy[int(step)]
+                        for step in steps
+                    )
+                )
+                if len(steps)
+                else 0.0
+            )
             rows.append(
                 {
                     "lag_seconds": float(target),
-                    "autocorrelation": covariance / variance
-                    if pairs and np.isfinite(variance)
-                    else np.nan,
+                    "autocorrelation": _normalized_pair_correlation(
+                        covariance,
+                        source_energy,
+                        target_energy,
+                        pairs,
+                    ),
                     "pair_count": pairs,
                 }
             )
@@ -144,6 +168,8 @@ def _elapsed_lag_autocorrelation(
         total = int(counts.sum())
         pair_count = 0
         covariance = 0.0
+        source_energy = 0.0
+        target_energy = 0.0
         if total:
             if total <= 2_000_000:
                 starts = np.cumsum(counts) - counts
@@ -152,9 +178,11 @@ def _elapsed_lag_autocorrelation(
                 matching = np.repeat(lower, counts) + local
                 valid = matching > source
                 pair_count = int(np.sum(valid))
-                covariance = float(
-                    np.dot(centered[source[valid]], centered[matching[valid]])
-                )
+                source_values = centered[source[valid]]
+                target_values = centered[matching[valid]]
+                covariance = float(np.dot(source_values, target_values))
+                source_energy = float(np.dot(source_values, source_values))
+                target_energy = float(np.dot(target_values, target_values))
             else:
                 for begin in range(0, len(finite_seconds), 4096):
                     end = min(begin + 4096, len(finite_seconds))
@@ -168,19 +196,46 @@ def _elapsed_lag_autocorrelation(
                     matching = np.repeat(lower[begin:end], chunk_counts) + local
                     valid = matching > source
                     pair_count += int(np.sum(valid))
-                    covariance += float(
-                        np.dot(centered[source[valid]], centered[matching[valid]])
-                    )
+                    source_values = centered[source[valid]]
+                    target_values = centered[matching[valid]]
+                    covariance += float(np.dot(source_values, target_values))
+                    source_energy += float(np.dot(source_values, source_values))
+                    target_energy += float(np.dot(target_values, target_values))
         rows.append(
             {
                 "lag_seconds": float(target),
-                "autocorrelation": covariance / variance
-                if pair_count and np.isfinite(variance)
-                else np.nan,
+                "autocorrelation": _normalized_pair_correlation(
+                    covariance,
+                    source_energy,
+                    target_energy,
+                    pair_count,
+                ),
                 "pair_count": pair_count,
             }
         )
     return pd.DataFrame(rows)
+
+
+def _normalized_pair_correlation(
+    covariance: float,
+    source_energy: float,
+    target_energy: float,
+    pair_count: int,
+) -> float:
+    """Normalize one elapsed-time bin's centered pairs by Cauchy-Schwarz.
+
+    A bin may contain several offsets, so summing their cross-products against
+    one whole-series variance counts the same series energy repeatedly.  The
+    pair-normalized cosine keeps the result in [-1, 1].  Three finite pairs is
+    the minimum diagnostic sample; smaller bins are reported as unavailable.
+    """
+
+    if pair_count < 3 or source_energy <= 0.0 or target_energy <= 0.0:
+        return np.nan
+    denominator = sqrt(source_energy * target_energy)
+    if not np.isfinite(denominator) or denominator <= 0.0:
+        return np.nan
+    return float(covariance / denominator)
 
 
 def _stable_logpdf(

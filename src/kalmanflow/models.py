@@ -36,17 +36,6 @@ class StateSpaceModel(Protocol):
 
         ...
 
-    def initial_inflow(
-        self,
-        first_storage: float,
-        second_storage: float,
-        first_discharge_rate: float,
-        elapsed_seconds: float,
-    ) -> float:
-        """Estimate the starting inflow from two storage readings."""
-
-        ...
-
     def initial_outflow(self, first_discharge_rate: float) -> float:
         """Return the first measured outflow used to start the model."""
 
@@ -144,7 +133,11 @@ class ReservoirStateSpaceModel:
         first_discharge_rate: float,
         elapsed_seconds: float,
     ) -> float:
-        """Estimate the starting inflow from storage change and outflow."""
+        """Calculate interval-average inflow from storage change and outflow.
+
+        This diagnostic helper uses both interval endpoints. The online and
+        batch filters do not use it for their first timestamped causal value.
+        """
 
         water_balance_volume = (
             float(second_storage)

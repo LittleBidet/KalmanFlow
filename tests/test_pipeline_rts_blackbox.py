@@ -10,7 +10,7 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
-from kalmone import (
+from kalmanflow import (
     OnlineFixedLagRTS,
     OnlineInflowPipeline,
     ReservoirBackend,
@@ -19,8 +19,8 @@ from kalmone import (
     kalman_step,
     smooth_filter_steps,
 )
-from kalmone.kalman import FilterStep
-from kalmone.pipeline import InitializationObservation
+from kalmanflow.kalman import FilterStep
+from kalmanflow.pipeline import InitializationObservation
 
 Q = np.diag([0.5, 0.1, 0.2])
 R = np.diag([0.25, 0.5])
@@ -262,12 +262,13 @@ class TestPipelineTimestampBoundaries:
             observation_covariance=R,
         )
 
-        first_step, _ = backend.initialize(
+        first_step, second_step = backend.initialize(
             InitializationObservation(first_timestamp, 100.0, 0.0),
             InitializationObservation(second_timestamp, 101.0, 0.0),
         )
 
-        assert first_step.predicted_mean[1] == pytest.approx(43560.0 / 3600.0)
+        assert first_step.predicted_mean[1] == 0.0
+        assert second_step.transition_matrix[0, 1] == pytest.approx(3600.0 / 43560.0)
 
 
 class TestPipelineWindowBoundaries:

@@ -14,7 +14,7 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
-from kalmone import FilterStep, kalman_filter, kalman_step, predict_state
+from kalmanflow import FilterStep, kalman_filter, kalman_step, predict_state
 
 
 def _scalar_filter(**overrides: object):
@@ -86,6 +86,67 @@ class TestShapeBoundaries:
                 np.eye(2),
                 np.eye(2),
                 control_offset=np.array([1.0]),
+            )
+
+
+class TestNumericalInputBoundaries:
+    """EP: invalid numerical inputs fail before filtering starts."""
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"initial_mean": np.array([np.nan])}, "initial_mean.*finite"),
+            (
+                {"initial_covariance": np.array([[np.nan]])},
+                "initial_covariance.*finite",
+            ),
+            (
+                {"initial_covariance": np.array([[-1.0]])},
+                "initial_covariance must be positive semidefinite",
+            ),
+            (
+                {"transition_matrix": np.array([[np.inf]])},
+                "transition_matrix.*finite",
+            ),
+            (
+                {"process_covariance": np.array([[-1.0]])},
+                "process_covariance must be positive semidefinite",
+            ),
+            (
+                {"observation_matrix": np.array([[np.nan]])},
+                "observation_matrix.*finite",
+            ),
+            (
+                {"observation_covariance": np.array([[-1.0]])},
+                "observation_covariance must be positive semidefinite",
+            ),
+            (
+                {"control_offsets": np.array([np.inf])},
+                "control_offsets.*finite",
+            ),
+        ],
+    )
+    def test_invalid_model_inputs_are_rejected(
+        self, overrides: dict[str, np.ndarray], message: str
+    ) -> None:
+        with pytest.raises(ValueError, match=message):
+            _scalar_filter(**overrides)
+
+    @pytest.mark.parametrize("value", [np.inf, -np.inf])
+    def test_infinite_observations_are_not_treated_as_missing(
+        self, value: float
+    ) -> None:
+        with pytest.raises(ValueError, match="observations.*finite values or NaN"):
+            _scalar_filter(observations=np.array([value]))
+
+    def test_asymmetric_covariance_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="initial_covariance must be symmetric"):
+            _scalar_filter(
+                initial_mean=np.zeros(2),
+                initial_covariance=np.array([[1.0, 0.5], [0.0, 1.0]]),
+                transition_matrix=np.eye(2),
+                process_covariance=np.eye(2),
+                observation_matrix=np.array([[1.0, 0.0]]),
             )
 
 

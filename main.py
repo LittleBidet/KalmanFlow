@@ -9,7 +9,7 @@ from datetime import timedelta
 
 import pandas as pd
 
-from kalmone.pandas_api import run_inflow_model
+from kalmanflow.pandas_api import run_inflow_model
 
 if __name__ == "__main__":
     index = pd.date_range("2024-01-01", periods=5, freq="15min", tz="UTC")

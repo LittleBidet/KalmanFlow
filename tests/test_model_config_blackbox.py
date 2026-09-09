@@ -9,7 +9,7 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
-from kalmone import (
+from kalmanflow import (
     InflowUnits,
     InitializationStrategy,
     Observation,
@@ -129,6 +129,11 @@ class TestUnitSystemPartitions:
         with pytest.raises(ValueError, match="must not be empty"):
             UnitSystem(volume_label=label)
 
+    @pytest.mark.parametrize("field", ["volume_label", "flow_label"])
+    def test_labels_must_be_strings(self, field: str) -> None:
+        with pytest.raises(TypeError, match=f"{field} must be a string"):
+            UnitSystem(**{field: 123})
+
     def test_nonfinite_flow_rate_rejected(self) -> None:
         units = UnitSystem.si()
         with pytest.raises(ValueError, match="flow_rate must be finite"):
@@ -189,6 +194,27 @@ class TestReservoirConfigPartitions:
         with pytest.raises(ValueError):
             _config(inflow_units="quadratic")
 
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "reservoir_id",
+            "reservoir_name",
+            "model_version",
+            "configuration_version",
+        ],
+    )
+    def test_identifier_and_version_fields_must_be_strings(self, field: str) -> None:
+        with pytest.raises(TypeError, match=f"{field} must be a string"):
+            _config(**{field: 123})
+
+    def test_smoothing_lag_must_be_a_timedelta(self) -> None:
+        with pytest.raises(TypeError, match="smoothing_lag must be a timedelta"):
+            _config(smoothing_lag=30)
+
+    def test_metadata_must_be_a_mapping(self) -> None:
+        with pytest.raises(TypeError, match="metadata must be a mapping"):
+            _config(metadata=123)
+
     def test_invalid_unit_system_type_rejected(self) -> None:
         with pytest.raises(TypeError, match="unit_system must be a UnitSystem"):
             _config(unit_system="not-a-unit-system")
@@ -248,3 +274,21 @@ class TestObservationPartitions:
                 storage=100.0,
                 discharge=4.0,
             )
+
+    @pytest.mark.parametrize("field", ["storage", "discharge"])
+    @pytest.mark.parametrize("value", [float("inf"), float("-inf")])
+    def test_infinite_measurements_are_rejected(
+        self, field: str, value: float
+    ) -> None:
+        values = {
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "storage": 100.0,
+            "discharge": 4.0,
+        }
+        values[field] = value
+        with pytest.raises(ValueError, match=f"{field} must be finite or NaN"):
+            Observation(**values)
+
+    def test_non_datetime_timestamp_is_rejected_cleanly(self) -> None:
+        with pytest.raises(TypeError, match="timestamp must be a datetime"):
+            Observation(timestamp="2024-01-01", storage=100.0, discharge=4.0)

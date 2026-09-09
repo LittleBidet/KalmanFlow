@@ -9,6 +9,7 @@ import numpy as np
 
 from ._validation import readonly_array
 from .flags import OutputFlag
+from .time_utils import validate_timestamp_precision
 
 Array = np.ndarray
 
@@ -26,8 +27,11 @@ class FilterStep:
     prediction_flag: OutputFlag = OutputFlag.NORMAL
 
     def __post_init__(self) -> None:
+        if not isinstance(self.timestamp, datetime):
+            raise TypeError("timestamp must be a datetime instance")
         if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
             raise ValueError("timestamp must be timezone-aware")
+        validate_timestamp_precision(self.timestamp)
 
         prediction_flag = OutputFlag(self.prediction_flag)
         if prediction_flag not in {OutputFlag.NORMAL, OutputFlag.PREDICTED}:
@@ -41,6 +45,10 @@ class FilterStep:
             raise ValueError(
                 "filtered_mean and predicted_mean must have matching 1-D shapes"
             )
+        if not filtered_mean.size:
+            raise ValueError("filtered_mean must contain at least one state")
+        _require_finite(filtered_mean, "filtered_mean")
+        _require_finite(predicted_mean, "predicted_mean")
         state_size = filtered_mean.shape[0]
         filtered_covariance = readonly_array(self.filtered_covariance)
         predicted_covariance = readonly_array(self.predicted_covariance)
@@ -55,6 +63,9 @@ class FilterStep:
                 raise ValueError(
                     f"{name} must have shape {expected_matrix_shape}; got {value.shape}"
                 )
+        _require_covariance(filtered_covariance, "filtered_covariance")
+        _require_covariance(predicted_covariance, "predicted_covariance")
+        _require_finite(transition_matrix, "transition_matrix")
 
         object.__setattr__(self, "filtered_mean", filtered_mean)
         object.__setattr__(self, "filtered_covariance", filtered_covariance)
@@ -94,7 +105,8 @@ def kalman_filter(
 ) -> KalmanFilterResult:
     """Process a sequence of observations from start to finish.
 
-    Missing observation values are ignored for that update. Matrices that
+    NaN observation values are ignored for that update. Infinities are
+    rejected. Matrices that
     describe changes over time may be shared by every step or supplied once
     per step.
     """
@@ -103,13 +115,20 @@ def kalman_filter(
     n_times, n_obs = y.shape
     if n_times == 0:
         raise ValueError("observations must contain at least one time step")
+    if n_obs == 0:
+        raise ValueError("observations must contain at least one component")
+    _require_no_infinity(y, "observations")
 
     x0 = np.asarray(initial_mean, dtype=float)
     p0 = np.asarray(initial_covariance, dtype=float)
     if x0.ndim != 1:
         raise ValueError("initial_mean must be one-dimensional")
+    if not x0.size:
+        raise ValueError("initial_mean must contain at least one state")
+    _require_finite(x0, "initial_mean")
     n_state = x0.shape[0]
     _require_shape(p0, (n_state, n_state), "initial_covariance")
+    _require_covariance(p0, "initial_covariance")
 
     n_transitions = max(n_times - 1, 0)
     transitions = _transition_array(
@@ -118,23 +137,29 @@ def kalman_filter(
         (n_state, n_state),
         "transition_matrix",
     )
+    _require_finite(transitions, "transition_matrix")
     process_covariances = _transition_array(
         process_covariance,
         n_transitions,
         (n_state, n_state),
         "process_covariance",
     )
+    _require_covariance_stack(process_covariances, "process_covariance")
     observation_matrices = _observation_array(
         observation_matrix,
         n_times,
         (n_obs, n_state),
         "observation_matrix",
     )
+    _require_finite(observation_matrices, "observation_matrix")
     observation_covariances = _observation_array(
         observation_covariance,
         n_times,
         (n_obs, n_obs),
         "observation_covariance",
+    )
+    _require_covariance_stack(
+        observation_covariances, "observation_covariance"
     )
     offsets = _control_offset_array(control_offsets, n_transitions, n_state)
     control_matrices, control_values = _matrix_control_arrays(
@@ -143,6 +168,12 @@ def kalman_filter(
         n_transitions,
         n_state,
     )
+    if offsets is not None:
+        _require_finite(offsets, "control_offsets")
+    if control_matrices is not None:
+        _require_finite(control_matrices, "control_matrix")
+    if control_values is not None:
+        _require_finite(control_values, "controls")
     filtered_means = np.empty((n_times, n_state), dtype=float)
     filtered_covariances = np.empty((n_times, n_state, n_state), dtype=float)
     predicted_means = np.empty((n_times, n_state), dtype=float)
@@ -166,7 +197,7 @@ def kalman_filter(
             offset = offset + _matrix_control_at(
                 control_matrices, control_values, step, n_state
             )
-            predicted_means[k], predicted_covariances[k] = predict_state(
+            predicted_means[k], predicted_covariances[k] = _predict_state_unchecked(
                 filtered_means[k - 1],
                 filtered_covariances[k - 1],
                 f,
@@ -214,18 +245,45 @@ def predict_state(
     covariance = np.asarray(filtered_covariance, dtype=float)
     transition = np.asarray(transition_matrix, dtype=float)
     process = np.asarray(process_covariance, dtype=float)
+    if mean.ndim != 1:
+        raise ValueError("filtered_mean must be one-dimensional")
+    if not mean.size:
+        raise ValueError("filtered_mean must contain at least one state")
+    _require_finite(mean, "filtered_mean")
     state_size = mean.shape[0]
     _require_shape(covariance, (state_size, state_size), "filtered_covariance")
     _require_shape(transition, (state_size, state_size), "transition_matrix")
     _require_shape(process, (state_size, state_size), "process_covariance")
+    _require_covariance(covariance, "filtered_covariance")
+    _require_finite(transition, "transition_matrix")
+    _require_covariance(process, "process_covariance")
     offset = (
         np.zeros(state_size, dtype=float)
         if control_offset is None
         else np.asarray(control_offset, dtype=float)
     )
     _require_shape(offset, (state_size,), "control_offset")
-    predicted_mean = transition @ mean + offset
-    predicted_covariance = _symmetrize(transition @ covariance @ transition.T + process)
+    _require_finite(offset, "control_offset")
+    return _predict_state_unchecked(
+        mean, covariance, transition, process, control_offset=offset
+    )
+
+
+def _predict_state_unchecked(
+    filtered_mean: Array,
+    filtered_covariance: Array,
+    transition_matrix: Array,
+    process_covariance: Array,
+    *,
+    control_offset: Array,
+) -> tuple[Array, Array]:
+    """Project an already-validated state without repeated boundary checks."""
+
+    predicted_mean = transition_matrix @ filtered_mean + control_offset
+    predicted_covariance = _symmetrize(
+        transition_matrix @ filtered_covariance @ transition_matrix.T
+        + process_covariance
+    )
     return predicted_mean, predicted_covariance
 
 
@@ -306,13 +364,23 @@ def initial_filter_step(
     """Create the first filter record from an initial state and observation."""
 
     predicted_mean = np.asarray(initial_mean, dtype=float).copy()
-    predicted_covariance = _symmetrize(np.asarray(initial_covariance, dtype=float))
+    predicted_covariance = np.asarray(initial_covariance, dtype=float).copy()
+    observation_values, observation_model, measurement_covariance = (
+        _validated_update_inputs(
+            predicted_mean,
+            predicted_covariance,
+            observation,
+            observation_matrix,
+            observation_covariance,
+        )
+    )
+    predicted_covariance = _symmetrize(predicted_covariance)
     filtered_mean, filtered_covariance, *_ = _update_prediction(
         predicted_mean,
         predicted_covariance,
-        observation,
-        observation_matrix,
-        observation_covariance,
+        observation_values,
+        observation_model,
+        measurement_covariance,
     )
     return FilterStep(
         timestamp=timestamp,
@@ -321,7 +389,7 @@ def initial_filter_step(
         predicted_mean=predicted_mean,
         predicted_covariance=predicted_covariance,
         transition_matrix=np.eye(predicted_mean.shape[0]),
-        prediction_flag=_prediction_flag(observation),
+        prediction_flag=_prediction_flag(observation_values),
     )
 
 
@@ -346,12 +414,21 @@ def kalman_step(
         process_covariance,
         control_offset=control_offset,
     )
+    observation_values, observation_model, measurement_covariance = (
+        _validated_update_inputs(
+            predicted_mean,
+            predicted_covariance,
+            observation,
+            observation_matrix,
+            observation_covariance,
+        )
+    )
     filtered_mean, filtered_covariance, *_ = _update_prediction(
         predicted_mean,
         predicted_covariance,
-        observation,
-        observation_matrix,
-        observation_covariance,
+        observation_values,
+        observation_model,
+        measurement_covariance,
     )
     return FilterStep(
         timestamp=timestamp,
@@ -360,11 +437,53 @@ def kalman_step(
         predicted_mean=predicted_mean,
         predicted_covariance=predicted_covariance,
         transition_matrix=transition_matrix,
-        prediction_flag=_prediction_flag(observation),
+        prediction_flag=_prediction_flag(observation_values),
     )
 
 
 # Helper functions
+
+
+def _validated_update_inputs(
+    predicted_mean: Array,
+    predicted_covariance: Array,
+    observation: Array,
+    observation_matrix: Array,
+    observation_covariance: Array,
+) -> tuple[Array, Array, Array]:
+    """Normalize and validate one public Kalman update boundary."""
+
+    mean = np.asarray(predicted_mean, dtype=float)
+    if mean.ndim != 1:
+        raise ValueError("predicted_mean must be one-dimensional")
+    if not mean.size:
+        raise ValueError("predicted_mean must contain at least one state")
+    _require_finite(mean, "predicted_mean")
+
+    covariance = np.asarray(predicted_covariance, dtype=float)
+    _require_shape(covariance, (mean.size, mean.size), "predicted_covariance")
+    _require_covariance(covariance, "predicted_covariance")
+
+    values = np.asarray(observation, dtype=float)
+    if values.ndim == 0:
+        values = values.reshape(1)
+    if values.ndim != 1:
+        raise ValueError("observation must be one-dimensional")
+    if not values.size:
+        raise ValueError("observation must contain at least one component")
+    _require_no_infinity(values, "observation")
+
+    model = np.asarray(observation_matrix, dtype=float)
+    measurement_covariance = np.asarray(observation_covariance, dtype=float)
+    _require_shape(model, (values.size, mean.size), "observation_matrix")
+    _require_shape(
+        measurement_covariance,
+        (values.size, values.size),
+        "observation_covariance",
+    )
+    _require_finite(model, "observation_matrix")
+    _require_covariance(measurement_covariance, "observation_covariance")
+    return values, model, measurement_covariance
 
 
 def _prediction_flag(observation: Array) -> OutputFlag:
@@ -542,6 +661,58 @@ def _require_shape(
 
     if array.shape != expected_shape:
         raise ValueError(f"{name} must have shape {expected_shape}; got {array.shape}")
+
+
+def _require_finite(array: np.ndarray, name: str) -> None:
+    """Reject a state or model array containing NaN or infinity."""
+
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values")
+
+
+def _require_no_infinity(array: np.ndarray, name: str) -> None:
+    """Allow NaN missing markers but reject either signed infinity."""
+
+    if np.isinf(array).any():
+        raise ValueError(f"{name} must contain only finite values or NaN")
+
+
+def _require_covariance(array: np.ndarray, name: str) -> None:
+    """Validate one finite, symmetric, positive-semidefinite covariance."""
+
+    _require_finite(array, name)
+    if not np.allclose(array, array.T, rtol=1e-10, atol=1e-12):
+        raise ValueError(f"{name} must be symmetric")
+    eigenvalues = np.linalg.eigvalsh(array)
+    tolerance = 1e-12 * max(1.0, float(np.max(np.abs(eigenvalues))))
+    if float(np.min(eigenvalues)) < -tolerance:
+        raise ValueError(f"{name} must be positive semidefinite")
+
+
+def _require_covariance_stack(array: np.ndarray, name: str) -> None:
+    """Validate a shared covariance or every member of a time-varying stack."""
+
+    if array.ndim == 2:
+        _require_covariance(array, name)
+        return
+    if not len(array):
+        return
+    _require_finite(array, name)
+    symmetric = np.all(
+        np.isclose(array, np.swapaxes(array, -1, -2), rtol=1e-10, atol=1e-12),
+        axis=(1, 2),
+    )
+    if not np.all(symmetric):
+        position = int(np.flatnonzero(~symmetric)[0])
+        raise ValueError(f"{name}[{position}] must be symmetric")
+    eigenvalues = np.linalg.eigvalsh(array)
+    tolerance = 1e-12 * np.maximum(
+        1.0, np.max(np.abs(eigenvalues), axis=1)
+    )
+    valid = np.min(eigenvalues, axis=1) >= -tolerance
+    if not np.all(valid):
+        position = int(np.flatnonzero(~valid)[0])
+        raise ValueError(f"{name}[{position}] must be positive semidefinite")
 
 
 def _solve_right(system_matrix: np.ndarray, right_factor: np.ndarray) -> np.ndarray:

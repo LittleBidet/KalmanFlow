@@ -1,18 +1,18 @@
 # API reference
 
-This page covers the complete supported package surface in Kalmone 0.1.0.
-Import application-facing names from `kalmone`. The advanced types below are
+This page covers the complete supported package surface in KalmanFlow 0.1.0.
+Import application-facing names from `kalmanflow`. The advanced types below are
 also package exports, but are intended for custom models and integrations.
 Names in modules beginning with `_` are internal and may change without a
 compatibility promise.
 
-`kalmone.__version__` reports the installed package version.
+`kalmanflow.__version__` reports the installed package version.
 
 ## Reservoir estimation
 
 | Export | Purpose |
 | --- | --- |
-| `Observation(timestamp, storage, discharge)` | Immutable streaming input. Timestamp must be timezone-aware; use `NaN` for a missing value after initialization. |
+| `Observation(timestamp, storage, discharge)` | Immutable streaming input. Timestamp must be timezone-aware and no finer than microsecond precision; use `NaN` for a missing value after initialization. |
 | `OnlineReservoirInflow` | Default acre-ft/cfs streaming estimator. Construct with the five scalar diagonal noise values; use `process`, `process_many`, `initialized`, and `pending_count`. |
 | `OnlineReservoirInflow.from_config(config)` | Creates a stream from reviewed configuration, including its units and smoothing lag. |
 | `OnlineReservoirInflow.from_checkpoint(checkpoint, config=...)` | Restores a configured stream. The reservoir ID and fingerprinted model, covariance, lag, and unit settings must match. |
@@ -25,10 +25,19 @@ compatibility promise.
 | `OutputFlag` | `NORMAL` or `PREDICTED` describes observation completeness; `SMOOTHED` or `NON_SMOOTHED` describes estimate provenance. |
 
 Both batch series must share an exactly equal timezone-aware, strictly
-increasing index. The package neither aligns nor cleans inputs. A revised
+increasing index with at most microsecond timestamp precision. The package
+neither aligns nor cleans inputs. A revised
 inflow always replaces the causal value at the same timestamp; it is never a
 delta. See [model behavior](INFLOW_MODEL_BEHAVIOR.md) for initialization,
 partial observations, and output columns.
+
+The reservoir inflow state is an inferred net balance contribution from the
+supplied storage and accounted outflow. Measured outflow should cover outlet
+releases, spills, and outward diversions or withdrawals as applicable.
+Precipitation, evaporation, seepage, and other water exchanges are not
+separate API terms. The linear-Gaussian estimate is not constrained to be
+nonnegative; sensor bias, storage-datum changes, and rating-curve changes can
+also appear as model mismatch.
 
 ## Configuration and units
 
@@ -47,9 +56,15 @@ semidefinite; `r` must have a strictly positive diagonal. See
 
 ## Bayesian noise evaluation and tuning
 
+The Bayesian search API is **experimental** and requires
+`pip install "kalmanflow[tuning]"`. Its API, selection rules, and result schema may
+change between releases. Review and independently validate any proposed
+configuration. `evaluate_configuration` is available with the base installation;
+the SciPy/scikit-learn optimizer dependencies load only when search is invoked.
+
 | Export | Purpose |
 | --- | --- |
-| `ValidationWindow(name, start, end, weight=None)` | Named, timezone-aware half-open interval `[start, end)` for causal scoring. |
+| `ValidationWindow(name, start, end, weight=None)` | Named, timezone-aware half-open interval `[start, end)` for causal scoring. Window boundaries may use nanosecond precision even though scored observation timestamps are limited to microseconds. |
 | `BayesianEvaluationSettings` | Shared warmup, innovation, calibration-warning, and numerical-stability settings. |
 | `BayesianTuningSettings` | Trial counts, covariance multiplier bounds, acquisition settings, and optional upstream-proxy shape/timing gate. |
 | `tune_inflow_noise_bayesian(...)` | Proposes five diagonal `q`/`r` terms from causal innovation scores. It needs at least three windows and a new proposed configuration version. |
@@ -68,13 +83,13 @@ details.
 
 ## Advanced state-space interfaces
 
-These exports make it possible to use Kalmone's filtering and smoothing with
+These exports make it possible to use KalmanFlow's filtering and smoothing with
 a different state-space model. They operate on NumPy arrays and do not impose
 reservoir units.
 
 | Export | Purpose |
 | --- | --- |
-| `kalman_filter(...)` | Batch linear-Gaussian filter. Transition, process, offset, and control arrays may be shared or have exactly `n_times - 1` entries; observation arrays may be shared or have exactly `n_times` entries. `NaN` observation components are omitted per step. |
+| `kalman_filter(...)` | Batch linear-Gaussian filter. Transition, process, offset, and control arrays may be shared or have exactly `n_times - 1` entries; observation arrays may be shared or have exactly `n_times` entries. Model arrays must be finite, covariance arrays symmetric positive semidefinite, and `NaN` is the only omitted observation value. |
 | `predict_state(...)` | Predicts one state mean and covariance, optionally with a control offset. |
 | `initial_filter_step(...)` / `kalman_step(...)` | Create immutable timestamped filter records for the initial or a later update. |
 | `FilterStep` / `KalmanFilterResult` | Filter records and complete batch outputs, including innovations, innovation covariance, update mask, transitions, and log likelihood. |
@@ -88,5 +103,5 @@ reservoir units.
 `OnlineFixedLagRTS` releases a state once the elapsed-time lag has passed and
 raises `OverflowError` if its active window reaches `max_window_steps` before
 release. Generic pipeline state and protocol types are available from
-`kalmone.pipeline` for custom checkpoint/replay implementations, but the
+`kalmanflow.pipeline` for custom checkpoint/replay implementations, but the
 reservoir checkpoint byte format remains internal.

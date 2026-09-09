@@ -16,7 +16,7 @@ from ._reservoir_checkpoint import (
     decode_reservoir_checkpoint,
     encode_reservoir_checkpoint,
 )
-from ._validation import bounded_integer
+from ._validation import bounded_integer, measurement_value
 from .flags import OutputFlag
 from .kalman import kalman_filter
 from .models import ReservoirStateSpaceModel
@@ -24,7 +24,7 @@ from .pipeline import ObservationLike, OnlineInflowPipeline
 from .reservoir_backend import ReservoirBackend
 from .reservoir_config import ReservoirConfig
 from .rts import OnlineFixedLagRTS, _rts_smooth_arrays
-from .time_utils import to_utc
+from .time_utils import to_utc, validate_timestamp_precision
 
 _UNSET: Final = object()
 
@@ -39,8 +39,11 @@ class ReservoirFlowEstimate:
     smoothing_flag: OutputFlag = OutputFlag.NON_SMOOTHED
 
     def __post_init__(self) -> None:
+        if not isinstance(self.timestamp, datetime):
+            raise TypeError("timestamp must be a datetime instance")
         if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
             raise ValueError("timestamp must be timezone-aware")
+        validate_timestamp_precision(self.timestamp)
         prediction_flag = OutputFlag(self.prediction_flag)
         if prediction_flag not in {OutputFlag.NORMAL, OutputFlag.PREDICTED}:
             raise ValueError("prediction_flag must be NORMAL or PREDICTED")
@@ -50,7 +53,10 @@ class ReservoirFlowEstimate:
             OutputFlag.NON_SMOOTHED,
         }:
             raise ValueError("smoothing_flag must be SMOOTHED or NON_SMOOTHED")
-        object.__setattr__(self, "value", float(self.value))
+        value = float(self.value)
+        if not np.isfinite(value):
+            raise ValueError("value must be finite")
+        object.__setattr__(self, "value", value)
         object.__setattr__(self, "prediction_flag", prediction_flag)
         object.__setattr__(self, "smoothing_flag", smoothing_flag)
 
@@ -329,6 +335,7 @@ class OnlineReservoirInflow:
             if not isinstance(timestamp, datetime):
                 raise TypeError("timestamp must be a datetime instance")
             timestamp_utc = to_utc(timestamp)
+            validate_timestamp_precision(timestamp)
             if previous_utc is not None and timestamp_utc <= previous_utc:
                 raise ValueError("observation timestamps must be strictly increasing")
             previous_utc = timestamp_utc
@@ -382,7 +389,7 @@ def _process_values_from_arguments(
         return _process_values_from_observation(observation)
     if any(value is _UNSET for value in (timestamp, storage, discharge)):
         raise TypeError("process requires timestamp, storage, and discharge")
-    return timestamp, storage, discharge  # type: ignore[return-value]
+    return _validated_process_values(timestamp, storage, discharge)
 
 
 def _process_values_from_observation(
@@ -390,7 +397,33 @@ def _process_values_from_observation(
 ) -> tuple[datetime, float, float]:
     """Extract structural observation fields without changing their values."""
 
-    return observation.timestamp, observation.storage, observation.discharge
+    try:
+        timestamp = observation.timestamp
+        storage = observation.storage
+        discharge = observation.discharge
+    except AttributeError as error:
+        raise TypeError(
+            "observation must provide timestamp, storage, and discharge"
+        ) from error
+    return _validated_process_values(timestamp, storage, discharge)
+
+
+def _validated_process_values(
+    timestamp: object,
+    storage: object,
+    discharge: object,
+) -> tuple[datetime, float, float]:
+    """Validate one structural observation before it can mutate a stream."""
+
+    if not isinstance(timestamp, datetime):
+        raise TypeError("timestamp must be a datetime instance")
+    to_utc(timestamp)
+    validate_timestamp_precision(timestamp)
+    return (
+        timestamp,
+        measurement_value(storage, name="storage"),
+        measurement_value(discharge, name="discharge"),
+    )
 
 
 def get_reservoir_inflow(
@@ -532,7 +565,9 @@ def _configuration_fingerprint(
     model = backend.model
     if not isinstance(model, ReservoirStateSpaceModel):
         raise TypeError("reservoir checkpointing requires ReservoirStateSpaceModel")
-    digest = hashlib.sha256(b"kalmone-reservoir-state-space-v1")
+    # Bump this semantic version whenever identical numeric configuration
+    # values would replay differently (for example, an initialization change).
+    digest = hashlib.sha256(b"kalmanflow-reservoir-state-space-v2")
     for array in (
         model.q_continuous,
         backend.initial_covariance,
@@ -623,6 +658,10 @@ def _process_reservoir_batch_raw(
     )
     if len(index) != len(storage) or len(index) != len(discharge):
         raise ValueError("batch inputs must have matching lengths")
+    if np.isinf(storage).any():
+        raise ValueError("storage must contain only finite values or NaN")
+    if np.isinf(discharge).any():
+        raise ValueError("discharge must contain only finite values or NaN")
 
     _validate_batch_timestamps(index)
     result = _empty_batch_columns(len(index))
@@ -651,9 +690,7 @@ def _process_reservoir_batch_raw(
     initial_mean = np.array(
         [
             storage[first],
-            backend.model.initial_inflow(
-                storage[first], storage[second], discharge[first], elapsed[0]
-            ),
+            backend.model.initial_outflow(discharge[first]),
             backend.model.initial_outflow(discharge[first]),
         ]
     )
@@ -725,6 +762,7 @@ def _validate_batch_timestamps(index: pandas.DatetimeIndex) -> None:
     previous_utc: datetime | None = None
     for timestamp in index:
         timestamp_utc = to_utc(timestamp)
+        validate_timestamp_precision(timestamp)
         if previous_utc is not None and timestamp_utc <= previous_utc:
             raise ValueError("observation timestamps must be strictly increasing")
         previous_utc = timestamp_utc

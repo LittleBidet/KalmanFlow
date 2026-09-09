@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import numpy as np
 
-from kalmone import (
+from kalmanflow import (
     InflowUnits,
     InitializationStrategy,
     OnlineReservoirInflow,
@@ -11,7 +11,7 @@ from kalmone import (
     ReservoirConfig,
     UnitSystem,
 )
-from kalmone.pipeline import OnlineInflowPipeline
+from kalmanflow.pipeline import OnlineInflowPipeline
 
 
 @dataclass(frozen=True)
@@ -223,6 +223,30 @@ def test_reservoir_stream_revises_with_smoothed_inflow_not_latent_outflow():
         discharge=2.0,
     )
 
-    assert update.filtered_inflows[0].value == 4.0
+    assert update.filtered_inflows[0].value == 2.0
     assert update.revised_inflows[0].timestamp == start
-    assert update.revised_inflows[0].value == 4.0
+    assert np.isclose(update.revised_inflows[0].value, 4.0)
+
+
+def test_first_causal_inflow_does_not_depend_on_second_storage() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+
+    def first_estimate(second_storage: float) -> float:
+        stream = OnlineReservoirInflow(
+            q_storage=0.1,
+            q_inflow=0.1,
+            q_outflow=0.1,
+            r_storage=0.25,
+            r_outflow=0.5,
+            smoothing_lag=timedelta(hours=1),
+        )
+        stream.process(timestamp=start, storage=100.0, discharge=4.0)
+        update = stream.process(
+            timestamp=start + timedelta(minutes=5),
+            storage=second_storage,
+            discharge=4.0,
+        )
+        return update.filtered_inflows[0].value
+
+    assert first_estimate(101.0) == 4.0
+    assert first_estimate(110.0) == 4.0
