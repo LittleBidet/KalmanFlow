@@ -164,7 +164,7 @@ revisions, including the trailing row, remain `NaN`.
 
 | API                                         | Use it when                                                                                                         |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `get_reservoir_inflow`                      | You have aligned pandas storage and discharge series and use the default acre-ft/cfs model.                         |
+| `get_reservoir_inflow`                      | You have aligned pandas storage and discharge series and scalar noise settings.                         |
 | `get_reservoir_inflow_from_config`          | You have batch data and a validated `ReservoirConfig`.                                                              |
 | `OnlineReservoirInflow`                     | You process one reservoir’s observations as they arrive.                                                            |
 | `OnlineReservoirInflow.from_config`         | You need a configured, checkpoint-capable streaming estimator.                                                      |
@@ -191,14 +191,24 @@ revisions, including the trailing row, remain `NaN`.
 
 ## Requirements and units
 
-Inputs must be pre-cleaned and indexed by unique, timezone-aware, strictly increasing timestamps with at most microsecond precision. Batch storage and discharge series must have exactly matching indexes. The default model uses acre-feet for storage and cfs for flow rates. Missing storage or discharge is represented by `NaN`; available
+Inputs must be pre-cleaned and indexed by unique, timezone-aware, strictly increasing timestamps with at most microsecond precision. Batch storage and discharge series must have exactly matching indexes. Missing storage or discharge is represented by `NaN`; available
 components still participate in a partial update.
+
+Storage defaults to acre-feet and flow to cfs. For m³ and m³/s, import
+`UnitSystem` from `kalmanflow` and pass `unit_system=UnitSystem.si()` to the
+batch or streaming estimator, or set it on `ReservoirConfig`. Input data and
+noise settings must already match the selected units; inflow results use the
+same flow unit as discharge. See [Configuration](Documentation/CONFIGURATION.md)
+for converting existing settings and data.
 
 The default state is `[storage, inflow_rate, true_outflow_rate]`. Storage and measured outflow are model inputs, and true outflow is an internal state. The public API returns causal inflow followed by absolute revised inflow values; it never returns outflow estimates.
 
 ## Development
 
 ```bash
-uv run --extra tuning pytest
+uv run --extra tuning pytest --cov --cov-report=term-missing
 uv run ruff check .
 ```
+
+Coverage includes statements and branches in the package, application scripts,
+notebook Python helpers, and `main.py`. Coverage is reported without a minimum threshold.

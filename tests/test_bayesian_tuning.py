@@ -22,6 +22,7 @@ from kalmanflow import (
 )
 from kalmanflow.bayesian_tuning import (
     _candidate,
+    _proxy,
     _types,
 )
 from kalmanflow.bayesian_tuning._diagnostics import (
@@ -862,6 +863,162 @@ def test_optional_upstream_proxy_is_reported_without_entering_objective() -> Non
     assert "upstream_proxy_available" not in result.selected_config.metadata
 
 
+def test_proxy_gate_restricts_selection_to_passing_valid_trials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage, discharge, windows = _inputs(60)
+    settings = BayesianEvaluationSettings(
+        warmup=timedelta(0), min_scored_storage_observations=2
+    )
+    search = BayesianTuningSettings(
+        total_trials=3,
+        initial_trials=3,
+        acquisition_pool_size=128,
+        random_seed=7,
+        proxy_min_aligned_points=6,
+    )
+    proxy = pd.Series(1.0, index=storage.index)
+
+    baseline = tune_inflow_noise_bayesian(
+        storage,
+        discharge,
+        _config(),
+        [2.0, 5.0, 10.0],
+        windows,
+        settings=settings,
+        bayesian_settings=search,
+        proposed_configuration_version="config-v2",
+    )
+    baseline_valid = baseline.candidate_summary.query("eligible")
+    innovation_best = int(
+        baseline_valid.sort_values(["robust_objective", "trial_id"])
+        .iloc[0]["trial_id"]
+    )
+    passing_trial = int(
+        baseline_valid.loc[baseline_valid["trial_id"] != innovation_best, "trial_id"]
+        .iloc[0]
+    )
+
+    calls: list[int] = []
+
+    def controlled_proxy_metrics(
+        *args: object, **kwargs: object
+    ) -> dict[str, float | bool]:
+        trial_id = len(calls)
+        calls.append(trial_id)
+        return {
+            "proxy_available": True,
+            "proxy_aligned_count": len(storage),
+            "proxy_best_lag_seconds": 0.0,
+            "proxy_shape_correlation": 1.0,
+            "proxy_change_correlation": 1.0,
+            "proxy_shape_rmse": 0.0,
+            "proxy_gate_passed": trial_id == passing_trial,
+        }
+
+    monkeypatch.setattr(_proxy, "_proxy_metrics", controlled_proxy_metrics)
+    result = tune_inflow_noise_bayesian(
+        storage,
+        discharge,
+        _config(),
+        [2.0, 5.0, 10.0],
+        windows,
+        settings=settings,
+        bayesian_settings=search,
+        upstream_proxy=proxy,
+        proposed_configuration_version="config-v2",
+    )
+
+    assert calls == list(range(search.total_trials))
+    summary = result.candidate_summary.set_index("trial_id")
+    proxy_summary = result.proxy_diagnostics.set_index("trial_id")
+    assert summary["eligible"].all()
+    assert (
+        summary.loc[innovation_best, "robust_objective"]
+        < summary.loc[passing_trial, "robust_objective"]
+    )
+    assert not bool(proxy_summary.loc[innovation_best, "proxy_gate_passed"])
+    assert bool(proxy_summary.loc[passing_trial, "proxy_gate_passed"])
+    assert set(summary.index[summary["competitive"]]) == {passing_trial}
+    assert int(summary.index[summary["selected"]][0]) == passing_trial
+    assert result.competitive_trial_ids == (passing_trial,)
+    assert any("restricted selection" in warning for warning in result.warnings)
+
+
+def test_proxy_gate_falls_back_to_innovation_valid_trials_when_all_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage, discharge, windows = _inputs(60)
+    settings = BayesianEvaluationSettings(
+        warmup=timedelta(0), min_scored_storage_observations=2
+    )
+    search = BayesianTuningSettings(
+        total_trials=3,
+        initial_trials=3,
+        acquisition_pool_size=128,
+        random_seed=7,
+        proxy_min_aligned_points=6,
+    )
+    proxy = pd.Series(1.0, index=storage.index)
+
+    baseline = tune_inflow_noise_bayesian(
+        storage,
+        discharge,
+        _config(),
+        [2.0, 5.0, 10.0],
+        windows,
+        settings=settings,
+        bayesian_settings=search,
+        proposed_configuration_version="config-v2",
+    )
+
+    calls: list[int] = []
+
+    def all_failing_proxy_metrics(
+        *args: object, **kwargs: object
+    ) -> dict[str, float | bool]:
+        calls.append(len(calls))
+        return {
+            "proxy_available": True,
+            "proxy_aligned_count": len(storage),
+            "proxy_best_lag_seconds": 0.0,
+            "proxy_shape_correlation": -1.0,
+            "proxy_change_correlation": -1.0,
+            "proxy_shape_rmse": 10.0,
+            "proxy_gate_passed": False,
+        }
+
+    monkeypatch.setattr(_proxy, "_proxy_metrics", all_failing_proxy_metrics)
+    result = tune_inflow_noise_bayesian(
+        storage,
+        discharge,
+        _config(),
+        [2.0, 5.0, 10.0],
+        windows,
+        settings=settings,
+        bayesian_settings=search,
+        upstream_proxy=proxy,
+        proposed_configuration_version="config-v2",
+    )
+
+    assert calls == list(range(search.total_trials))
+    assert result.candidate_summary["eligible"].all()
+    assert not result.proxy_diagnostics["proxy_gate_passed"].any()
+    baseline_summary = baseline.candidate_summary.set_index("trial_id")
+    summary = result.candidate_summary.set_index("trial_id")
+    assert int(summary.index[summary["selected"]][0]) == int(
+        baseline_summary.index[baseline_summary["selected"]][0]
+    )
+    assert set(summary.index[summary["competitive"]]) == set(
+        baseline_summary.index[baseline_summary["competitive"]]
+    )
+    assert any(
+        "no valid Bayesian trial passed the upstream-proxy shape/timing gate"
+        in warning
+        for warning in result.warnings
+    )
+
+
 def test_bayesian_report_surface_is_compact() -> None:
     storage, discharge, windows = _inputs()
     settings, search = _settings()
@@ -1144,6 +1301,32 @@ def test_frozen_evaluation_requires_scored_data_before_calibration() -> None:
         "scored storage observations" in warning
         for warning in evaluation.warnings
     )
+
+
+def test_frozen_evaluation_reports_calibration_warnings_for_finite_data() -> None:
+    storage, discharge, _ = _inputs(30)
+    evaluation = evaluate_configuration(
+        storage,
+        discharge,
+        _config(),
+        settings=BayesianEvaluationSettings(
+            warmup=timedelta(0),
+            min_scored_storage_observations=2,
+            nis_warning_range=(1e9, 1e10),
+            innovation_bias_warning=None,
+        ),
+    )
+
+    summary = evaluation.candidate_summary.iloc[0]
+    assert bool(summary["eligible"])
+    assert not bool(summary["calibrated"])
+    for metric in ("joint_nis", "storage_nis", "outflow_nis"):
+        assert np.isfinite(summary[metric])
+        assert any(
+            warning.startswith(f"{metric}=")
+            and "outside the configured warning range" in warning
+            for warning in evaluation.warnings
+        )
 
 
 def test_frozen_evaluation_rejects_submicrosecond_observation_index() -> None:

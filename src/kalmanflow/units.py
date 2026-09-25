@@ -81,3 +81,20 @@ class UnitSystem:
             raise ValueError("elapsed_seconds must be positive and finite")
         return volume_value / elapsed / self.flow_to_volume_per_second
 
+    def conversion_factors_to(self, target: UnitSystem) -> tuple[float, float]:
+        """Return storage and flow multipliers for converting values to target.
+
+        Custom labels do not establish physical scale; automatic conversion
+        therefore supports only built-in systems or identical systems.
+        """
+        if not isinstance(target, UnitSystem):
+            raise TypeError("target must be a UnitSystem instance")
+        if self == target:
+            return 1.0, 1.0
+        cubic_feet_to_cubic_metres = 0.3048**3
+        us_to_si = (43560.0 * cubic_feet_to_cubic_metres, cubic_feet_to_cubic_metres)
+        if self == UnitSystem.us_customary() and target == UnitSystem.si():
+            return us_to_si
+        if self == UnitSystem.si() and target == UnitSystem.us_customary():
+            return 1.0 / us_to_si[0], 1.0 / us_to_si[1]
+        raise ValueError("automatic conversion requires built-in US or SI units")

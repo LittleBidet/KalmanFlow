@@ -36,7 +36,13 @@ jobs:
         run: uv run --no-sync ruff check .
 
       - name: Run tests
-        run: uv run --no-sync python -m pytest
+        run: uv run --no-sync python -m pytest --cov --cov-report=term-missing
 
       - name: Build wheel and source distribution
         run: uv build --no-sources
+
+      - name: Verify wheel in a clean core-dependencies environment
+        run: |
+          uv venv .wheel-smoke
+          uv pip install --python .wheel-smoke/bin/python dist/kalmanflow-*.whl
+          .wheel-smoke/bin/python -c "import kalmanflow; assert kalmanflow.__all__"

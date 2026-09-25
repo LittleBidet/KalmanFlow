@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from enum import StrEnum
 from types import MappingProxyType
@@ -53,8 +53,8 @@ class ReservoirConfig:
 
     ``q`` is the continuous-time diffusion covariance for the state
     ``[storage, inflow_rate, true_outflow_rate]``. ``p0`` uses the same
-    physical state units, and ``inflow_units`` describes the flow-rate unit
-    represented by both flow-rate state elements.
+    physical state units. ``unit_system`` specifies storage and flow units.
+    ``inflow_units`` is an optional legacy consistency check.
     """
 
     reservoir_id: str
@@ -64,9 +64,11 @@ class ReservoirConfig:
     p0: Array
     smoothing_lag: timedelta
     initialization_strategy: InitializationStrategy
-    inflow_units: InflowUnits
-    model_version: str
-    configuration_version: str
+    inflow_units: InflowUnits = InflowUnits.SYSTEM_FLOW_RATE
+    # Empty defaults preserve the legacy positional signature; validation below
+    # still requires callers to supply both nonempty version strings.
+    model_version: str = ""
+    configuration_version: str = ""
     metadata: Mapping[str, Any] = field(default_factory=dict)
     unit_system: UnitSystem = field(default_factory=UnitSystem.us_customary)
 
@@ -118,3 +120,22 @@ class ReservoirConfig:
         object.__setattr__(self, "inflow_units", inflow_units)
         object.__setattr__(self, "metadata", _freeze_metadata(self.metadata))
         object.__setattr__(self, "unit_system", self.unit_system)
+
+    def to_units(self, unit_system: UnitSystem) -> ReservoirConfig:
+        """Return a copy with covariances converted to the target unit system.
+
+        Converts all entries, including cross-covariances, in q, r and p0.
+        Observations must be converted separately. Only built-in US/SI systems
+        (or identical custom systems) support automatic conversion.
+        """
+        volume_factor, flow_factor = self.unit_system.conversion_factors_to(unit_system)
+        state = np.array([volume_factor, flow_factor, flow_factor])
+        observation = np.array([volume_factor, flow_factor])
+        return replace(
+            self,
+            q=self.q * np.outer(state, state),
+            r=self.r * np.outer(observation, observation),
+            p0=self.p0 * np.outer(state, state),
+            unit_system=unit_system,
+            inflow_units=InflowUnits.SYSTEM_FLOW_RATE,
+        )

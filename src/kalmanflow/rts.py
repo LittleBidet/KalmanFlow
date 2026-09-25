@@ -187,11 +187,13 @@ class OnlineFixedLagRTS:
         if self._steps and to_utc(step.timestamp) <= to_utc(self._steps[-1].timestamp):
             raise ValueError("filter-step timestamps must be strictly increasing")
         active = (*self._steps, step)
+        lag_seconds = self._lag.total_seconds()
         eligible_count = 0
-        for active_step in active:
+        # The new step has age zero and cannot finalize under a positive lag.
+        for active_step in self._steps:
             if (
                 elapsed_seconds(step.timestamp, active_step.timestamp, allow_zero=True)
-                >= self._lag.total_seconds()
+                >= lag_seconds
             ):
                 eligible_count += 1
             else:

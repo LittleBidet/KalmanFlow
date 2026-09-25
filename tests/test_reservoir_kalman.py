@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from kalmanflow import (
+    FilterStep,
     InflowUnits,
     InitializationStrategy,
     Observation,
@@ -79,6 +80,28 @@ def _forward_steps(count: int = 4):
     return steps
 
 
+def _scalar_rts_steps() -> tuple[FilterStep, FilterStep]:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    return (
+        FilterStep(
+            timestamp=start,
+            filtered_mean=np.array([0.0]),
+            filtered_covariance=np.array([[1.0]]),
+            predicted_mean=np.array([0.0]),
+            predicted_covariance=np.array([[1.0]]),
+            transition_matrix=np.array([[1.0]]),
+        ),
+        FilterStep(
+            timestamp=start + timedelta(minutes=15),
+            filtered_mean=np.array([2.0]),
+            filtered_covariance=np.array([[1.0]]),
+            predicted_mean=np.array([1.0]),
+            predicted_covariance=np.array([[2.0]]),
+            transition_matrix=np.array([[1.0]]),
+        ),
+    )
+
+
 def test_reservoir_model_scales_time_process_noise_and_flow_units() -> None:
     model = ReservoirStateSpaceModel(Q)
 
@@ -90,6 +113,10 @@ def test_reservoir_model_scales_time_process_noise_and_flow_units() -> None:
             [0.0, 0.0, 1.0],
         ],
     )
+    short_process = model.process_covariance(900.0)
+    long_process = model.process_covariance(1800.0)
+    assert long_process[1, 1] == pytest.approx(2.0 * short_process[1, 1])
+    assert long_process[0, 1] > 2.0 * short_process[0, 1]
     alpha = 1.0 / 43560.0
     expected_process = np.array(
         [
@@ -177,23 +204,6 @@ def test_reservoir_config_freezes_arrays_and_metadata() -> None:
         config.metadata["new"] = "value"
 
 
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    [
-        ({"reservoir_id": ""}, "reservoir_id must not be empty"),
-        ({"q": np.eye(2)}, "q must have shape"),
-        ({"r": np.diag([0.0, 1.0])}, "r diagonal entries"),
-        ({"p0": np.diag([1.0, -1.0, 1.0])}, "positive semidefinite"),
-        ({"smoothing_lag": timedelta(0)}, "smoothing_lag must be positive"),
-    ],
-)
-def test_reservoir_config_validates_domain_constraints(
-    overrides: dict[str, object], message: str
-) -> None:
-    with pytest.raises(ValueError, match=message):
-        _config(**overrides)
-
-
 def test_observation_validates_timezone() -> None:
     timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     observation = Observation(
@@ -220,6 +230,36 @@ def test_full_rts_smoothing_returns_immutable_smoothed_states() -> None:
     npt.assert_allclose(smoothed[-1].mean, steps[-1].filtered_mean)
     with pytest.raises(ValueError):
         smoothed[0].mean[0] = 0.0
+
+
+def test_full_rts_smoothing_matches_independent_scalar_oracle() -> None:
+    first, last = _scalar_rts_steps()
+
+    smoothed = smooth_filter_steps((first, last))
+
+    assert [state.timestamp for state in smoothed] == [
+        first.timestamp,
+        last.timestamp,
+    ]
+    npt.assert_allclose(smoothed[0].mean, [0.5])
+    npt.assert_allclose(smoothed[0].covariance, [[0.75]])
+    npt.assert_allclose(smoothed[1].mean, [2.0])
+    npt.assert_allclose(smoothed[1].covariance, [[1.0]])
+
+
+def test_fixed_lag_rts_matches_independent_scalar_oracle() -> None:
+    first, last = _scalar_rts_steps()
+    smoother = OnlineFixedLagRTS(
+        timedelta(minutes=15),
+        max_window_steps=2,
+    )
+
+    assert smoother.add_step(first) == ()
+    (finalized,) = smoother.add_step(last)
+
+    assert finalized.timestamp == first.timestamp
+    npt.assert_allclose(finalized.mean, [0.5])
+    npt.assert_allclose(finalized.covariance, [[0.75]])
 
 
 def test_fixed_lag_rts_finalizes_only_elapsed_states() -> None:

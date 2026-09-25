@@ -27,8 +27,10 @@ from .reservoir_backend import ReservoirBackend
 from .reservoir_config import ReservoirConfig
 from .rts import OnlineFixedLagRTS, _rts_smooth_arrays
 from .time_utils import to_utc, validate_timestamp_precision
+from .units import UnitSystem
 
 _UNSET: Final = object()
+_DEFAULT_UNITS: Final = UnitSystem.us_customary()
 
 
 def _validate_include_uncertainty(value: object) -> bool:
@@ -190,9 +192,15 @@ class OnlineReservoirInflow:
         smoothing_lag: timedelta = timedelta(hours=12),
         max_window_steps: int = 100_000,
         reservoir_id: str | None = None,
+        unit_system: UnitSystem = _DEFAULT_UNITS,
         include_uncertainty: bool = False,
     ) -> None:
         """Create an estimator with the supplied noise settings.
+
+        Pass ``unit_system=UnitSystem.si()`` for m³ storage and m³/s flow.
+        Data and noise parameters must already use the selected units.
+        The initial covariance diagonal is [100, 1000, 1000] in squared
+        selected state units; use ``from_config`` to specify it explicitly.
 
         ``reservoir_id`` is optional. It is required only when creating a
         checkpoint; callers using resumable streams should prefer
@@ -209,6 +217,7 @@ class OnlineReservoirInflow:
             q_outflow=q_outflow,
             r_storage=r_storage,
             r_outflow=r_outflow,
+            unit_system=unit_system,
         )
         self._pipeline = _build_pipeline(
             backend,
@@ -569,6 +578,7 @@ def get_reservoir_inflow(
     r_outflow: float,
     smoothing_lag: timedelta = timedelta(hours=12),
     *,
+    unit_system: UnitSystem = _DEFAULT_UNITS,
     max_window_steps: int = 100_000,
     include_uncertainty: bool = False,
 ) -> pandas.DataFrame:
@@ -580,16 +590,21 @@ def get_reservoir_inflow(
 
     Units
     -----
-    - ``reservoir_storage``: acre-ft
-    - ``reservoir_outflow``: measured cfs
-    - returned ``estimated_inflow``: cfs, causal filtered estimates
-    - returned ``revised_inflow``: cfs, finalized fixed-lag-smoothed
+    Defaults to acre-ft and cfs; pass ``UnitSystem.si()`` for m³ and m³/s.
+    Data and noise parameters must already use the selected units.
+    Initial covariance is diag([100, 1000, 1000]) in squared selected state
+    units; use the configuration adapter to specify it explicitly.
+
+    - ``reservoir_storage``: selected volume unit
+    - ``reservoir_outflow``: measured flow in the selected flow unit
+    - returned ``estimated_inflow``: selected flow unit, causal filtered estimates
+    - returned ``revised_inflow``: selected flow unit, finalized fixed-lag-smoothed
       replacements for the causal estimates at the same timestamps
 
-    :param reservoir_storage: Pre-cleaned storage series in acre-ft. Index must
-        be a timezone-aware, strictly increasing ``DateTimeIndex``. NaN marks
+    :param reservoir_storage: Pre-cleaned storage in the selected volume unit.
+        Index must be a timezone-aware, strictly increasing ``DateTimeIndex``. NaN marks
         missing storage; any finite discharge still contributes a partial update.
-    :param reservoir_outflow: Pre-cleaned outflow/discharge series in cfs on
+    :param reservoir_outflow: Pre-cleaned discharge in the selected flow unit, on
         the same index and span as ``reservoir_storage``. NaN marks missing
         discharge; missing discharge is omitted from that Kalman update.
     :param q_storage: Continuous-time process-noise spectral density for storage.
@@ -625,6 +640,7 @@ def get_reservoir_inflow(
         q_outflow=q_outflow,
         r_storage=r_storage,
         r_outflow=r_outflow,
+        unit_system=unit_system,
     )
     return _run_batch(
         reservoir_storage,
@@ -752,12 +768,14 @@ def _build_default_backend(
     q_outflow: float,
     r_storage: float,
     r_outflow: float,
+    unit_system: UnitSystem = _DEFAULT_UNITS,
 ) -> ReservoirBackend:
     """Build the default reservoir backend for either public adapter."""
 
     return ReservoirBackend(
         model=ReservoirStateSpaceModel(
             q_continuous=np.diag([q_storage, q_inflow, q_outflow]),
+            unit_system=unit_system,
         ),
         initial_covariance=np.diag([100.0, 1000.0, 1000.0]),
         observation_covariance=np.diag([r_storage, r_outflow]),

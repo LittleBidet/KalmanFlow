@@ -44,6 +44,25 @@ def test_upstream_proxy_metrics_perfect_agreement() -> None:
     assert result["normalized_rmse"] == pytest.approx(0.0)
 
 
+def test_upstream_proxy_metrics_imperfect_agreement_matches_hand_calculation() -> None:
+    upstream = [1.0, 2.0, 3.0, 4.0, 5.0]
+    estimate = [2.0, 4.0, 8.0, 6.0, 10.0]
+
+    result = upstream_proxy_metrics(estimate, upstream)
+
+    assert result["paired_observations"] == 5
+    assert result["coverage"] == pytest.approx(1.0)
+    assert result["pearson_correlation"] == pytest.approx(0.9)
+    assert result["spearman_correlation"] == pytest.approx(0.9)
+    assert result["kge_correlation"] == pytest.approx(0.9)
+    assert result["kge_variability_ratio"] == pytest.approx(2.0)
+    assert result["kge_mean_flow_ratio"] == pytest.approx(2.0)
+    assert result["kge"] == pytest.approx(1.0 - np.sqrt(2.01))
+    assert result["percent_bias"] == pytest.approx(100.0)
+    assert result["nse"] == pytest.approx(-4.9)
+    assert result["normalized_rmse"] == pytest.approx(np.sqrt(59.0 / 45.0))
+
+
 def test_lagged_correlation_uses_positive_lag_for_delayed_estimate() -> None:
     index = _hourly_index(9)
     upstream = pd.Series([2.0, 5.0, 1.0, 7.0, 3.0, 8.0, 4.0, 6.0, 9.0], index=index)

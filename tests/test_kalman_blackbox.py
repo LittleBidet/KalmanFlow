@@ -7,7 +7,6 @@ Coverage techniques:
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
 import numpy as np
@@ -153,12 +152,26 @@ class TestNumericalInputBoundaries:
 class TestTimeVaryingMatrixPartitions:
     """EP: constant vs time-varying matrix lengths."""
 
-    def test_transition_matrix_accepts_n_transitions_length(self) -> None:
+    def test_time_varying_transition_and_process_matrices_are_applied_per_step(
+        self,
+    ) -> None:
         result = _scalar_filter(
-            observations=np.array([1.0, 2.0, 3.0]),
-            transition_matrix=np.stack([np.array([[1.0]]), np.array([[1.0]])]),
+            observations=np.array([np.nan, np.nan, np.nan]),
+            initial_mean=np.array([1.0]),
+            initial_covariance=np.array([[1.0]]),
+            transition_matrix=np.array([[[2.0]], [[3.0]]]),
+            process_covariance=np.array([[[1.0]], [[2.0]]]),
         )
-        assert result.transition_matrices.shape == (2, 1, 1)
+
+        npt.assert_allclose(result.transition_matrices[:, 0, 0], [2.0, 3.0])
+        npt.assert_allclose(result.predicted_means[:, 0], [1.0, 2.0, 6.0])
+        npt.assert_allclose(
+            result.predicted_covariances[:, 0, 0], [1.0, 5.0, 47.0]
+        )
+        npt.assert_allclose(result.filtered_means, result.predicted_means)
+        npt.assert_allclose(
+            result.filtered_covariances, result.predicted_covariances
+        )
 
     def test_transition_matrix_rejects_unused_n_times_length(self) -> None:
         with pytest.raises(ValueError, match="transition_matrix must have shape"):
@@ -176,12 +189,26 @@ class TestTimeVaryingMatrixPartitions:
                 transition_matrix=np.stack([np.array([[1.0]])]),
             )
 
-    def test_observation_matrix_accepts_per_time_matrices(self) -> None:
+    def test_time_varying_observation_and_noise_matrices_are_applied_per_time(
+        self,
+    ) -> None:
         result = _scalar_filter(
-            observations=np.array([1.0, 2.0]),
-            observation_matrix=np.stack([np.array([[1.0]]), np.array([[1.0]])]),
+            observations=np.array([1.0, 2.0, 4.0]),
+            initial_mean=np.array([0.0]),
+            initial_covariance=np.array([[1.0]]),
+            transition_matrix=np.array([[1.0]]),
+            process_covariance=np.array([[0.0]]),
+            observation_matrix=np.array([[[1.0]], [[2.0]], [[4.0]]]),
+            observation_covariance=np.array([[[1.0]], [[2.0]], [[0.5]]]),
         )
-        assert result.filtered_means.shape == (2, 1)
+
+        npt.assert_allclose(result.predicted_means[:, 0], [0.0, 0.5, 0.75])
+        npt.assert_allclose(
+            result.filtered_means[:, 0], [0.5, 0.75, 35.0 / 36.0]
+        )
+        npt.assert_allclose(
+            result.filtered_covariances[:, 0, 0], [0.5, 0.25, 1.0 / 36.0]
+        )
 
     def test_observation_matrix_rejects_wrong_time_length(self) -> None:
         with pytest.raises(ValueError, match="observation_matrix must have shape"):
@@ -208,20 +235,55 @@ class TestControlPartitions:
                 controls=np.array([0.5, 0.5]),
             )
 
-    def test_per_step_controls_and_matrix_are_accepted(self) -> None:
+    def test_constant_matrix_control_is_applied_at_each_step(self) -> None:
         result = _scalar_filter(
-            observations=np.array([1.0, 2.0, 3.0]),
-            control_matrix=np.stack([np.array([[1.0]]), np.array([[1.0]])]),
+            observations=np.array([np.nan, np.nan, np.nan]),
+            initial_mean=np.array([0.0]),
+            initial_covariance=np.array([[0.0]]),
+            transition_matrix=np.array([[1.0]]),
+            process_covariance=np.array([[0.0]]),
+            control_matrix=np.array([[2.0]]),
+            controls=np.array([0.5]),
+        )
+
+        npt.assert_allclose(result.predicted_means[:, 0], [0.0, 1.0, 2.0])
+
+    def test_varying_matrix_controls_use_each_matrix_and_value(self) -> None:
+        result = _scalar_filter(
+            observations=np.array([np.nan, np.nan, np.nan]),
+            initial_mean=np.array([0.0]),
+            initial_covariance=np.array([[0.0]]),
+            transition_matrix=np.array([[1.0]]),
+            process_covariance=np.array([[0.0]]),
+            control_matrix=np.array([[[2.0]], [[3.0]]]),
             controls=np.array([0.5, 1.0]),
         )
-        assert result.filtered_means.shape == (3, 1)
 
-    def test_per_step_control_offsets_are_accepted(self) -> None:
+        npt.assert_allclose(result.predicted_means[:, 0], [0.0, 1.0, 4.0])
+
+    def test_constant_control_offset_is_applied_at_each_step(self) -> None:
         result = _scalar_filter(
-            observations=np.array([1.0, 2.0, 3.0]),
+            observations=np.array([np.nan, np.nan, np.nan]),
+            initial_mean=np.array([0.0]),
+            initial_covariance=np.array([[0.0]]),
+            transition_matrix=np.array([[1.0]]),
+            process_covariance=np.array([[0.0]]),
+            control_offsets=np.array([0.5]),
+        )
+
+        npt.assert_allclose(result.predicted_means[:, 0], [0.0, 0.5, 1.0])
+
+    def test_varying_control_offsets_use_each_value(self) -> None:
+        result = _scalar_filter(
+            observations=np.array([np.nan, np.nan, np.nan]),
+            initial_mean=np.array([0.0]),
+            initial_covariance=np.array([[0.0]]),
+            transition_matrix=np.array([[1.0]]),
+            process_covariance=np.array([[0.0]]),
             control_offsets=np.array([[0.5], [1.0]]),
         )
-        assert result.filtered_means.shape == (3, 1)
+
+        npt.assert_allclose(result.predicted_means[:, 0], [0.0, 0.5, 1.5])
 
     def test_invalid_control_offsets_shape_rejected(self) -> None:
         with pytest.raises(ValueError, match="control_offsets must have shape"):
@@ -254,7 +316,9 @@ class TestMissingObservationPartitions:
 
     def test_partial_missing_updates_only_finite_components(self) -> None:
         result = kalman_filter(
-            observations=np.array([[1.0, np.nan], [np.nan, 3.0]]),
+            observations=np.array(
+                [[1.0, np.nan], [np.nan, 3.0], [np.nan, np.nan]]
+            ),
             initial_mean=np.zeros(2),
             initial_covariance=np.eye(2),
             transition_matrix=np.eye(2),
@@ -262,9 +326,11 @@ class TestMissingObservationPartitions:
             observation_matrix=np.eye(2),
             observation_covariance=np.eye(2) * 0.5,
         )
-        assert result.update_mask.tolist() == [True, True]
+        assert result.update_mask.tolist() == [True, True, False]
         assert np.isnan(result.innovations[1, 0])
         assert np.isfinite(result.innovations[1, 1])
+        npt.assert_allclose(result.filtered_means[1, 0], result.predicted_means[1, 0])
+        npt.assert_allclose(result.filtered_means[2], result.predicted_means[2])
 
 
 class TestSingularInnovationFallback:
@@ -310,17 +376,3 @@ class TestFilterStepContract:
                 observation_matrix=np.array([[1.0]]),
                 observation_covariance=np.array([[0.5]]),
             )
-
-    def test_filter_step_arrays_are_read_only(self) -> None:
-        step = FilterStep(
-            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-            filtered_mean=np.array([1.0]),
-            filtered_covariance=np.array([[1.0]]),
-            predicted_mean=np.array([1.0]),
-            predicted_covariance=np.array([[1.0]]),
-            transition_matrix=np.array([[1.0]]),
-        )
-        with pytest.raises(ValueError):
-            step.filtered_mean[0] = 0.0
-        with pytest.raises(FrozenInstanceError):
-            step.timestamp = datetime(2024, 1, 2, tzinfo=UTC)

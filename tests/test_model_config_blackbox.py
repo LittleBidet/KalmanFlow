@@ -52,13 +52,6 @@ def _model(**overrides: object) -> ReservoirStateSpaceModel:
 class TestReservoirModelBoundaries:
     """BVA/EP for ReservoirStateSpaceModel."""
 
-    def test_continuous_process_noise_scales_with_elapsed_time(self) -> None:
-        model = _model()
-        short = model.process_covariance(900.0)
-        long = model.process_covariance(1800.0)
-        assert long[1, 1] == pytest.approx(2.0 * short[1, 1])
-        assert long[0, 1] > 2.0 * short[0, 1]
-
     @pytest.mark.parametrize(
         ("elapsed", "message"),
         [

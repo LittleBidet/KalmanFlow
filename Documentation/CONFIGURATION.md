@@ -10,7 +10,6 @@ from datetime import timedelta
 import numpy as np
 
 from kalmanflow import (
-    InflowUnits,
     InitializationStrategy,
     ReservoirConfig,
     UnitSystem,
@@ -24,13 +23,17 @@ config = ReservoirConfig(
     p0=np.diag([1_000.0, 100.0, 100.0]),
     smoothing_lag=timedelta(hours=12),
     initialization_strategy=InitializationStrategy.FIRST_TWO_VALID_STORAGE,
-    inflow_units=InflowUnits.CUBIC_FEET_PER_SECOND,
     model_version="physical-rate-v1",
     configuration_version="2026-01",
     metadata={"source": "initial calibration"},
     unit_system=UnitSystem.us_customary(),
 )
 ```
+
+The example uses the default acre-feet/cfs units. For data and covariance
+values already in m³ and m³/s, set `unit_system=UnitSystem.si()` instead.
+This same keyword is available on `OnlineReservoirInflow(...)` and
+`get_reservoir_inflow(...)`; selecting units does not convert input numbers.
 
 Then pass it to either adapter:
 
@@ -77,6 +80,25 @@ The state order is `[storage, inflow_rate, true_outflow_rate]`.
 
 All covariance matrices must be finite, symmetric, and positive semidefinite. The two diagonal elements of `r` must be strictly positive. KalmanFlow derives each discrete process covariance from `q` and the actual elapsed time between observations, so never reuse a discrete, fixed-interval Q matrix as `q`.
 
+To convert an existing configuration, use `config.to_units(UnitSystem.si())`.
+This returns a copy with every entry of `q`, `r`, and `p0` scaled, including
+cross-covariances; time stays in seconds and metadata and versions are preserved.
+Convert observation data separately with the corresponding multipliers:
+
+```python
+metric_config = config.to_units(UnitSystem.si())
+volume_factor, flow_factor = config.unit_system.conversion_factors_to(UnitSystem.si())
+metric_storage = storage * volume_factor
+metric_discharge = discharge * flow_factor
+```
+
+Automatic conversion supports built-in US/SI systems or identical custom
+systems. Custom systems must supply a positive `flow_to_volume_per_second`
+matching their storage unit; conversion between different custom systems is
+manual. The simple estimators use an initial covariance diagonal of
+`[100, 1000, 1000]` in squared selected state units; use `ReservoirConfig`
+when you need to specify or convert `p0`.
+
 The balance model infers a net storage balance contribution. Measured outflow
 should include outlet releases, spills, and outward diversions or withdrawals
 as applicable. Precipitation, evaporation, seepage, and other water exchanges
@@ -85,7 +107,6 @@ or document them as model mismatch. Sensor bias, storage-datum changes, and
 rating-curve changes are additional mismatch sources. Estimates are not
 constrained to be nonnegative.
 
-`UnitSystem.us_customary()` uses acre-feet and cfs; `UnitSystem.si()` uses m³ and m³/s. A custom `UnitSystem` must supply a positive `flow_to_volume_per_second` conversion that matches the storage unit.
 
 ## Selecting parameters
 

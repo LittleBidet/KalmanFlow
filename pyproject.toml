@@ -1,6 +1,6 @@
 [project]
 name = "kalmanflow"
-version = "0.1.0a2"
+version = "0.1.0a3"
 description = "Causal filtering and fixed-lag inflow revisions for reservoir inflow estimation."
 readme = "README.md"
 license = "Apache-2.0"
@@ -38,7 +38,9 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "plotly>=6.9.0",
     "pytest>=8.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.15.17",
 ]
 notebook = [
@@ -64,6 +66,15 @@ source-exclude = [
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/kalmanflow", "applications", "Notebooks", "main"]
+
+[tool.coverage.report]
+fail_under = 100
+precision = 2
+show_missing = true
 
 [tool.ruff]
 extend-exclude = [

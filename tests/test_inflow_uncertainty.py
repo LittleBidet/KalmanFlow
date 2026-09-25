@@ -232,6 +232,16 @@ def test_uncertainty_interval_requires_opt_in_and_validates_standard_deviation(
     with pytest.raises(ValueError, match="uncertainty is unavailable"):
         estimate.uncertainty_interval()
 
+    uncertain = ReservoirFlowEstimate(
+        datetime(2024, 1, 1, tzinfo=UTC),
+        value=10.0,
+        standard_deviation=2.0,
+    )
+    lower, upper = uncertain.uncertainty_interval()
+    assert lower < uncertain.value < upper
+    with pytest.raises(ValueError, match="strictly between"):
+        uncertain.uncertainty_interval(1.0)
+
     with pytest.raises(ValueError, match="standard_deviation must be non-negative"):
         ReservoirFlowEstimate(
             datetime(2024, 1, 1, tzinfo=UTC),
@@ -359,20 +369,53 @@ def test_checkpoint_can_restore_with_a_different_uncertainty_output_setting() ->
             )
 
 
-def test_pandas_wrapper_passes_through_uncertainty_option() -> None:
+def test_pandas_wrapper_forwards_all_model_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     index = pd.date_range("2024-01-01", periods=3, freq="15min", tz="UTC")
+    observations = pd.DataFrame(
+        {"storage": [100.0, 101.0, 102.0], "outflow": [4.0, 4.0, 4.0]},
+        index=index,
+    )
+    expected = pd.DataFrame({"sentinel": [1.0, 2.0, 3.0]}, index=index)
+    captured: dict[str, object] = {}
+
+    def fake_get_reservoir_inflow(
+        storage: pd.Series,
+        outflow: pd.Series,
+        **kwargs: object,
+    ) -> pd.DataFrame:
+        captured["storage"] = storage
+        captured["outflow"] = outflow
+        captured["kwargs"] = kwargs
+        return expected
+
+    monkeypatch.setattr(
+        "kalmanflow.pandas_api.get_reservoir_inflow",
+        fake_get_reservoir_inflow,
+    )
     result = run_inflow_model(
-        pd.DataFrame(
-            {"storage": [100.0, 101.0, 102.0], "outflow": [4.0, 4.0, 4.0]},
-            index=index,
-        ),
-        q_storage=0.1,
-        q_inflow=0.1,
-        q_outflow=0.1,
-        r_storage=0.25,
-        r_outflow=0.5,
-        smoothing_lag=timedelta(minutes=15),
+        observations,
+        q_storage=1.25,
+        q_inflow=2.5,
+        q_outflow=3.75,
+        r_storage=4.5,
+        r_outflow=5.25,
+        smoothing_lag=timedelta(minutes=7),
+        max_window_steps=37,
         include_uncertainty=True,
     )
-    assert "estimated_inflow_standard_deviation" in result
-    assert "revised_inflow_standard_deviation" in result
+
+    assert result is expected
+    pd.testing.assert_series_equal(captured["storage"], observations["storage"])
+    pd.testing.assert_series_equal(captured["outflow"], observations["outflow"])
+    assert captured["kwargs"] == {
+        "q_storage": 1.25,
+        "q_inflow": 2.5,
+        "q_outflow": 3.75,
+        "r_storage": 4.5,
+        "r_outflow": 5.25,
+        "smoothing_lag": timedelta(minutes=7),
+        "max_window_steps": 37,
+        "include_uncertainty": True,
+    }

@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import numpy.testing as npt
 import pandas as pd
 import pytest
 
@@ -115,25 +116,6 @@ def test_restore_after_every_observation_matches_uninterrupted_execution() -> No
             stream.checkpoint(),
             config=config,
         )
-
-    _assert_updates_equal(actual, expected)
-
-
-def test_multiple_checkpoint_restarts_match_one_continuous_run() -> None:
-    config = _config()
-    observations = _observations(count=9)
-
-    continuous = OnlineReservoirInflow.from_config(config)
-    expected = tuple(continuous.process(item) for item in observations)
-
-    restarted = OnlineReservoirInflow.from_config(config)
-    actual = []
-    for index, observation in enumerate(observations):
-        actual.append(restarted.process(observation))
-        if index in {1, 4, 6}:
-            restarted = OnlineReservoirInflow.from_checkpoint(
-                restarted.checkpoint(), config=config
-            )
 
     _assert_updates_equal(actual, expected)
 
@@ -401,6 +383,30 @@ def test_checkpoint_rejects_incompatible_model_settings() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "processed_count",
+    [
+        pytest.param(1, id="waiting_for_second"),
+        pytest.param(2, id="replay_from_initialization"),
+        pytest.param(3, id="replay_from_anchor"),
+    ],
+)
+def test_public_checkpoint_rejects_truncation_and_trailing_bytes(
+    processed_count: int,
+) -> None:
+    config = _config(smoothing_lag=timedelta(minutes=30))
+    observations = _observations(count=processed_count)
+    stream = OnlineReservoirInflow.from_config(config)
+    for observation in observations:
+        stream.process(observation)
+    checkpoint = stream.checkpoint()
+
+    with pytest.raises(ValueError, match="truncated reservoir checkpoint"):
+        OnlineReservoirInflow.from_checkpoint(checkpoint[:-1], config=config)
+    with pytest.raises(ValueError, match="trailing bytes"):
+        OnlineReservoirInflow.from_checkpoint(checkpoint + b"\x00", config=config)
+
+
 @pytest.mark.parametrize("checkpoint_index", [0, 1, 2, 4])
 def test_restore_at_initialization_and_window_positions(checkpoint_index: int) -> None:
     config = _config()
@@ -614,3 +620,110 @@ def test_batch_apis_remain_checkpoint_free() -> None:
         "checkpoint"
         not in inspect.signature(get_reservoir_inflow_from_config).parameters
     )
+
+
+def test_batch_and_stream_match_at_exact_lag_with_full_window_and_uncertainty() -> None:
+    config = _config(smoothing_lag=timedelta(minutes=30))
+    observations = _observations(count=4)
+    index = pd.DatetimeIndex([observation.timestamp for observation in observations])
+    storage = pd.Series(
+        [observation.storage for observation in observations],
+        index=index,
+    )
+    discharge = pd.Series(
+        [observation.discharge for observation in observations],
+        index=index,
+    )
+
+    batch = get_reservoir_inflow_from_config(
+        storage,
+        discharge,
+        config,
+        max_window_steps=2,
+        include_uncertainty=True,
+    )
+    stream = OnlineReservoirInflow.from_config(
+        config,
+        max_window_steps=2,
+        include_uncertainty=True,
+    )
+    filtered = {}
+    revised = {}
+    for observation in observations:
+        update = stream.process(observation)
+        for estimate in update.filtered_inflows:
+            filtered[estimate.timestamp] = estimate
+        for estimate in update.revised_inflows:
+            revised[estimate.timestamp] = estimate
+
+    assert list(revised) == list(index[:2])
+    assert batch.index.equals(index)
+    npt.assert_allclose(
+        batch["estimated_inflow"],
+        [filtered[timestamp].value for timestamp in index],
+    )
+    npt.assert_allclose(
+        batch["estimated_inflow_standard_deviation"],
+        [filtered[timestamp].standard_deviation for timestamp in index],
+    )
+    npt.assert_allclose(
+        batch["revised_inflow"],
+        [
+            revised[timestamp].value if timestamp in revised else np.nan
+            for timestamp in index
+        ],
+        equal_nan=True,
+    )
+    npt.assert_allclose(
+        batch["revised_inflow_standard_deviation"],
+        [
+            revised[timestamp].standard_deviation
+            if timestamp in revised
+            else np.nan
+            for timestamp in index
+        ],
+        equal_nan=True,
+    )
+    assert batch["estimated_inflow_flag"].tolist() == ["NORMAL"] * 4
+    revised_flags = batch["revised_inflow_flag"].tolist()
+    assert revised_flags[:2] == ["NORMAL", "NORMAL"]
+    assert all(pd.isna(flag) for flag in revised_flags[2:])
+    assert batch["estimated_inflow_smoothing_flag"].tolist() == [
+        "NON_SMOOTHED"
+    ] * 4
+    assert batch["revised_inflow_smoothing_flag"].tolist() == [
+        "SMOOTHED",
+        "SMOOTHED",
+        "NON_SMOOTHED",
+        "NON_SMOOTHED",
+    ]
+
+
+def test_batch_and_stream_overflow_before_lag_with_full_window() -> None:
+    config = _config(smoothing_lag=timedelta(hours=1))
+    observations = _observations(count=3)
+    index = pd.DatetimeIndex([observation.timestamp for observation in observations])
+    storage = pd.Series(
+        [observation.storage for observation in observations],
+        index=index,
+    )
+    discharge = pd.Series(
+        [observation.discharge for observation in observations],
+        index=index,
+    )
+
+    with pytest.raises(OverflowError, match="max_window_steps"):
+        get_reservoir_inflow_from_config(
+            storage,
+            discharge,
+            config,
+            max_window_steps=2,
+        )
+
+    stream = OnlineReservoirInflow.from_config(config, max_window_steps=2)
+    stream.process(observations[0])
+    stream.process(observations[1])
+    assert stream.pending_count == 2
+    with pytest.raises(OverflowError, match="max_window_steps"):
+        stream.process(observations[2])
+    assert stream.pending_count == 2
