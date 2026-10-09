@@ -10,7 +10,7 @@ KalmanFlow estimates an inflow contribution from noisy storage and measured disc
 
 The package is intentionally data-source agnostic: applications are responsible for parsing, cleaning, aligning, and persisting reservoir data.
 
-![KalmanFlow workflow: aligned storage and outflow observations feed a causal Kalman filter, followed by delayed fixed-lag RTS revisions; uncertainty is optional.](Documentation/images/kalmanflow-workflow.png)
+![KalmanFlow workflow: aligned storage and outflow observations feed a causal Kalman filter, followed by delayed fixed-lag RTS revisions; uncertainty is optional.](https://raw.githubusercontent.com/LittleBidet/KalmanFlow/7611546d5bff5517e32271cc0097738d02dabf5b/Documentation/images/kalmanflow-workflow.png)
 
 ## Overview
 
@@ -25,17 +25,17 @@ The reported inflow is the residual term in the supplied storage and outflow bal
 ## Example results
 
 These charts use the numerical results saved in the
-[reservoir example notebook](Notebooks/reservoir_pandas_api.ipynb), using Chesbro
+[reservoir example notebook](https://github.com/LittleBidet/KalmanFlow/blob/main/Notebooks/reservoir_pandas_api.ipynb), using Chesbro
 Reservoir observations from January 1–15, 2023 and a four-hour smoothing lag.
 
-![Chesbro inflow comparison: raw water balance, six-hour centered rolling mean, revised inflow, and an upstream proxy, in cfs.](Documentation/images/inflow-comparison.png)
+![Chesbro inflow comparison: raw water balance, six-hour centered rolling mean, revised inflow, and an upstream proxy, in cfs.](https://raw.githubusercontent.com/LittleBidet/KalmanFlow/7611546d5bff5517e32271cc0097738d02dabf5b/Documentation/images/inflow-comparison.png)
 
 The comparison includes the raw water balance, its six-hour centered rolling
 mean, and the revised inflow estimate. The centered mean uses future observations;
 it is a retrospective comparison. The upstream series is a proxy rather than a
 direct measurement of total reservoir inflow.
 
-![Chesbro revised inflow with a shaded pointwise model-based 95% uncertainty interval, in cfs.](Documentation/images/inflow-uncertainty.png)
+![Chesbro revised inflow with a shaded pointwise model-based 95% uncertainty interval, in cfs.](https://raw.githubusercontent.com/LittleBidet/KalmanFlow/7611546d5bff5517e32271cc0097738d02dabf5b/Documentation/images/inflow-uncertainty.png)
 
 The shaded interval comes from the revised inflow covariance and configured
 noise settings. It describes model-based uncertainty, not independently
@@ -219,7 +219,7 @@ Storage defaults to acre-feet and flow to cfs. For m³ and m³/s, import
 `UnitSystem` from `kalmanflow` and pass `unit_system=UnitSystem.si()` to the
 batch or streaming estimator, or set it on `ReservoirConfig`. Input data and
 noise settings must already match the selected units; inflow results use the
-same flow unit as discharge. See [Configuration](Documentation/CONFIGURATION.md)
+same flow unit as discharge. See [Configuration](https://github.com/LittleBidet/KalmanFlow/blob/main/Documentation/CONFIGURATION.md)
 for converting existing settings and data.
 
 The default state is `[storage, inflow_rate, true_outflow_rate]`. Storage and measured outflow are model inputs, and true outflow is an internal state. The public API returns causal inflow followed by absolute revised inflow values; it never returns outflow estimates.
