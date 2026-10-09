@@ -10,6 +10,8 @@ KalmanFlow estimates an inflow contribution from noisy storage and measured disc
 
 The package is intentionally data-source agnostic: applications are responsible for parsing, cleaning, aligning, and persisting reservoir data.
 
+![KalmanFlow workflow: aligned storage and outflow observations feed a causal Kalman filter, followed by delayed fixed-lag RTS revisions; uncertainty is optional.](Documentation/images/kalmanflow-workflow.png)
+
 ## Overview
 
 Reservoir inflow is important for water-supply planning and flood-response operations, but it is often difficult to measure directly. A reservoir may receive water from many tributaries, drainage areas, or stormwater inputs, so installing and maintaining flow sensors at every inflow point is not practical.
@@ -19,6 +21,25 @@ Timestamped reservoir storage and outflow data can be used to infer a net balanc
 KalmanFlow estimates a more stable inflow time series from those noisy observations. After the two-observation startup phase, a causal inflow is published as observations arrive; a later observation can provide an absolute, fixed-lag-smoothed replacement for that same timestamp. It also provides documented assumptions and reviewed noise parameters for a measurable, defensible deployment.
 
 The reported inflow is the residual term in the supplied storage and outflow balance. It is a net balance contribution, not automatically gross watershed inflow. Measured outflow should cover outlet releases, spills, and outward diversions or withdrawals as applicable. Precipitation, evaporation, seepage, and other water exchanges are not separate model terms; account for them with separate justified inputs or treat them as model mismatch. Sensor bias, storage-datum changes, and rating-curve changes are also possible mismatch sources. The linear-Gaussian model has no nonnegativity constraint, so negative estimates remain possible.
+
+## Example results
+
+These charts use the numerical results saved in the
+[reservoir example notebook](Notebooks/reservoir_pandas_api.ipynb), using Chesbro
+Reservoir observations from January 1–15, 2023 and a four-hour smoothing lag.
+
+![Chesbro inflow comparison: raw water balance, six-hour centered rolling mean, revised inflow, and an upstream proxy, in cfs.](Documentation/images/inflow-comparison.png)
+
+The comparison includes the raw water balance, its six-hour centered rolling
+mean, and the revised inflow estimate. The centered mean uses future observations;
+it is a retrospective comparison. The upstream series is a proxy rather than a
+direct measurement of total reservoir inflow.
+
+![Chesbro revised inflow with a shaded pointwise model-based 95% uncertainty interval, in cfs.](Documentation/images/inflow-uncertainty.png)
+
+The shaded interval comes from the revised inflow covariance and configured
+noise settings. It describes model-based uncertainty, not independently
+calibrated accuracy. Negative lower bounds are preserved.
 
 ## Install
 
