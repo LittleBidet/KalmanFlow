@@ -22,6 +22,15 @@ KalmanFlow estimates a more stable inflow time series from those noisy observati
 
 The reported inflow is the residual term in the supplied storage and outflow balance. It is a net balance contribution, not automatically gross watershed inflow. Measured outflow should cover outlet releases, spills, and outward diversions or withdrawals as applicable. Precipitation, evaporation, seepage, and other water exchanges are not separate model terms; account for them with separate justified inputs or treat them as model mismatch. Sensor bias, storage-datum changes, and rating-curve changes are also possible mismatch sources. The linear-Gaussian model has no nonnegativity constraint, so negative estimates remain possible.
 
+## How KalmanFlow works
+
+This 87-second animation introduces the reservoir inflow problem and the
+filter-and-smoother workflow, then walks through the Kalman prediction and
+correction steps and fixed-lag RTS revisions. It uses synthetic observations
+and illustrative noise settings with a three-hour smoothing lag.
+
+https://github.com/user-attachments/assets/8f3b4a5b-467d-434d-b264-94e0a61b023e
+
 ## Example results
 
 These charts use the numerical results saved in the
