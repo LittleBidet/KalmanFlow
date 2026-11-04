@@ -135,8 +135,8 @@ reservoir units.
 
 | Export | Purpose |
 | --- | --- |
-| `kalman_filter(...)` | Batch linear-Gaussian filter. Transition, process, offset, and control arrays may be shared or have exactly `n_times - 1` entries; observation arrays may be shared or have exactly `n_times` entries. Model arrays must be finite, covariance arrays symmetric positive semidefinite, and `NaN` is the only omitted observation value. |
-| `predict_state(...)` | Predicts one state mean and covariance, optionally with a control offset. |
+| `kalman_filter(...)` | Batch linear-Gaussian filter. Transition and process arrays may be shared or have exactly `n_times - 1` entries; observation arrays may be shared or have exactly `n_times` entries. Model arrays must be finite, covariance arrays symmetric positive semidefinite, and `NaN` is the only omitted observation value. |
+| `predict_state(...)` | Predicts one state mean and covariance. |
 | `initial_filter_step(...)` / `kalman_step(...)` | Create immutable timestamped filter records for the initial or a later update. |
 | `FilterStep` / `KalmanFilterResult` | Filter records and complete batch outputs, including innovations, innovation covariance, update mask, transitions, and log likelihood. |
 | `smooth_filter_steps(steps)` | Runs full-record RTS smoothing and returns one `SmoothedStep` per input step. Empty input returns an empty tuple. |

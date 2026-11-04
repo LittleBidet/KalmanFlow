@@ -11,8 +11,6 @@ from kalmanflow import (
     get_reservoir_inflow,
     initial_filter_step,
     kalman_filter,
-    kalman_step,
-    predict_state,
 )
 
 
@@ -33,34 +31,6 @@ def test_kalman_filter_matches_scalar_closed_form_updates() -> None:
     assert result.update_mask.tolist() == [True, True]
 
 
-def test_predict_and_single_step_support_control_offsets() -> None:
-    transition = np.array([[1.0, 1.0], [0.0, 1.0]])
-    process = np.diag([0.2, 0.05])
-    mean, covariance = predict_state(
-        np.array([1.0, 2.0]),
-        np.eye(2),
-        transition,
-        process,
-        control_offset=np.array([0.5, -0.25]),
-    )
-
-    npt.assert_allclose(mean, [3.5, 1.75])
-    npt.assert_allclose(covariance, transition @ transition.T + process)
-
-    step = kalman_step(
-        timestamp=datetime(2024, 1, 1, 0, 15, tzinfo=UTC),
-        previous_filtered_mean=np.array([1.0, 2.0]),
-        previous_filtered_covariance=np.eye(2),
-        transition_matrix=transition,
-        process_covariance=process,
-        observation=np.array([3.0]),
-        observation_matrix=np.array([[1.0, 0.0]]),
-        observation_covariance=np.array([[0.5]]),
-        control_offset=np.array([0.5, -0.25]),
-    )
-    npt.assert_allclose(step.predicted_mean, mean)
-    assert step.timestamp.tzinfo is UTC
-    assert step.filtered_mean.shape == (2,)
 
 
 @pytest.mark.parametrize(

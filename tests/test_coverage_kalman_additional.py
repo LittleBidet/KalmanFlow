@@ -98,36 +98,6 @@ def test_update_helper_normalizes_scalar_and_rejects_nonvector_observation() -> 
         )
 
 
-def test_matrix_control_validation_reports_invalid_matrix_and_control_shapes() -> None:
-    with pytest.raises(ValueError, match="control_matrix must have shape"):
-        _scalar_filter(
-            observations=np.array([1.0, 2.0]),
-            control_matrix=np.ones((2, 1, 1)),
-            controls=np.array([0.5]),
-        )
-    with pytest.raises(ValueError, match="controls must have shape"):
-        _scalar_filter(
-            observations=np.array([1.0, 2.0, 3.0]),
-            control_matrix=np.array([[1.0]]),
-            controls=np.array([0.5, 0.6, 0.7]),
-        )
-    with pytest.raises(ValueError, match="controls must have shape"):
-        _scalar_filter(
-            observations=np.array([1.0, 2.0, 3.0]),
-            control_matrix=np.array([[1.0]]),
-            controls=np.ones((1, 1)),
-        )
-
-    result = _scalar_filter(
-        observations=np.array([np.nan, np.nan, np.nan]),
-        initial_mean=np.array([0.0]),
-        initial_covariance=np.array([[0.0]]),
-        transition_matrix=np.array([[1.0]]),
-        process_covariance=np.array([[0.0]]),
-        control_matrix=np.array([[1.0]]),
-        controls=np.array([[0.5], [0.75]]),
-    )
-    np.testing.assert_allclose(result.predicted_means[:, 0], [0.0, 0.5, 1.25])
 
 
 def test_covariance_stack_handles_empty_nonsymmetric_and_indefinite_stacks() -> None:

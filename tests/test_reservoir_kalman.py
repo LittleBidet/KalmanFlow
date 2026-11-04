@@ -74,7 +74,6 @@ def _forward_steps(count: int = 4):
                 observation=np.array([10.0 + 0.7 * index]),
                 observation_matrix=observation_matrix,
                 observation_covariance=observation_covariance,
-                control_offset=np.array([-0.1, 0.0]),
             )
         )
     return steps

@@ -13,7 +13,7 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
-from kalmanflow import FilterStep, kalman_filter, kalman_step, predict_state
+from kalmanflow import FilterStep, kalman_filter, kalman_step
 
 
 def _scalar_filter(**overrides: object):
@@ -77,15 +77,6 @@ class TestShapeBoundaries:
         with pytest.raises(ValueError, match="initial_covariance must have shape"):
             _scalar_filter(initial_covariance=np.eye(2))
 
-    def test_predict_state_rejects_mismatched_control_offset(self) -> None:
-        with pytest.raises(ValueError, match="control_offset must have shape"):
-            predict_state(
-                np.array([1.0, 2.0]),
-                np.eye(2),
-                np.eye(2),
-                np.eye(2),
-                control_offset=np.array([1.0]),
-            )
 
 
 class TestNumericalInputBoundaries:
@@ -118,10 +109,6 @@ class TestNumericalInputBoundaries:
             (
                 {"observation_covariance": np.array([[-1.0]])},
                 "observation_covariance must be positive semidefinite",
-            ),
-            (
-                {"control_offsets": np.array([np.inf])},
-                "control_offsets.*finite",
             ),
         ],
     )
@@ -218,90 +205,14 @@ class TestTimeVaryingMatrixPartitions:
             )
 
 
-class TestControlPartitions:
-    """EP: control argument pairing and shape partitions."""
 
-    def test_control_matrix_without_controls_rejected(self) -> None:
-        with pytest.raises(ValueError, match="must be supplied together"):
-            _scalar_filter(
-                observations=np.array([1.0, 2.0]),
-                control_matrix=np.array([[1.0]]),
-            )
 
-    def test_controls_without_control_matrix_rejected(self) -> None:
-        with pytest.raises(ValueError, match="must be supplied together"):
-            _scalar_filter(
-                observations=np.array([1.0, 2.0]),
-                controls=np.array([0.5, 0.5]),
-            )
-
-    def test_constant_matrix_control_is_applied_at_each_step(self) -> None:
-        result = _scalar_filter(
-            observations=np.array([np.nan, np.nan, np.nan]),
-            initial_mean=np.array([0.0]),
-            initial_covariance=np.array([[0.0]]),
-            transition_matrix=np.array([[1.0]]),
-            process_covariance=np.array([[0.0]]),
-            control_matrix=np.array([[2.0]]),
-            controls=np.array([0.5]),
-        )
-
-        npt.assert_allclose(result.predicted_means[:, 0], [0.0, 1.0, 2.0])
-
-    def test_varying_matrix_controls_use_each_matrix_and_value(self) -> None:
-        result = _scalar_filter(
-            observations=np.array([np.nan, np.nan, np.nan]),
-            initial_mean=np.array([0.0]),
-            initial_covariance=np.array([[0.0]]),
-            transition_matrix=np.array([[1.0]]),
-            process_covariance=np.array([[0.0]]),
-            control_matrix=np.array([[[2.0]], [[3.0]]]),
-            controls=np.array([0.5, 1.0]),
-        )
-
-        npt.assert_allclose(result.predicted_means[:, 0], [0.0, 1.0, 4.0])
-
-    def test_constant_control_offset_is_applied_at_each_step(self) -> None:
-        result = _scalar_filter(
-            observations=np.array([np.nan, np.nan, np.nan]),
-            initial_mean=np.array([0.0]),
-            initial_covariance=np.array([[0.0]]),
-            transition_matrix=np.array([[1.0]]),
-            process_covariance=np.array([[0.0]]),
-            control_offsets=np.array([0.5]),
-        )
-
-        npt.assert_allclose(result.predicted_means[:, 0], [0.0, 0.5, 1.0])
-
-    def test_varying_control_offsets_use_each_value(self) -> None:
-        result = _scalar_filter(
-            observations=np.array([np.nan, np.nan, np.nan]),
-            initial_mean=np.array([0.0]),
-            initial_covariance=np.array([[0.0]]),
-            transition_matrix=np.array([[1.0]]),
-            process_covariance=np.array([[0.0]]),
-            control_offsets=np.array([[0.5], [1.0]]),
-        )
-
-        npt.assert_allclose(result.predicted_means[:, 0], [0.0, 0.5, 1.5])
-
-    def test_invalid_control_offsets_shape_rejected(self) -> None:
-        with pytest.raises(ValueError, match="control_offsets must have shape"):
-            _scalar_filter(
-                observations=np.array([1.0, 2.0, 3.0]),
-                control_offsets=np.array([[0.5]]),
-            )
-
-    def test_single_step_still_validates_dynamics_and_control_pairing(self) -> None:
+class TestSingleStepDynamics:
+    def test_single_step_still_validates_dynamics(self) -> None:
         with pytest.raises(ValueError, match="transition_matrix must have shape"):
             _scalar_filter(
                 observations=np.array([1.0]),
                 transition_matrix=np.ones((7, 2, 3)),
-            )
-        with pytest.raises(ValueError, match="must be supplied together"):
-            _scalar_filter(
-                observations=np.array([1.0]),
-                control_matrix=np.array([[1.0]]),
             )
 
 

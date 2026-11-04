@@ -76,7 +76,6 @@ def _forward_steps(count: int = 4) -> tuple[FilterStep, ...]:
                 observation=np.array([10.0 + 0.7 * index]),
                 observation_matrix=observation_matrix,
                 observation_covariance=observation_covariance,
-                control_offset=np.array([-0.1, 0.0]),
             )
         )
     return tuple(steps)

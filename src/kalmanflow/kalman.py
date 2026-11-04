@@ -98,10 +98,6 @@ def kalman_filter(
     process_covariance: np.ndarray,
     observation_matrix: np.ndarray,
     observation_covariance: np.ndarray,
-    *,
-    control_offsets: np.ndarray | None = None,
-    control_matrix: np.ndarray | None = None,
-    controls: np.ndarray | None = None,
 ) -> KalmanFilterResult:
     """Process a sequence of observations from start to finish.
 
@@ -161,19 +157,6 @@ def kalman_filter(
     _require_covariance_stack(
         observation_covariances, "observation_covariance"
     )
-    offsets = _control_offset_array(control_offsets, n_transitions, n_state)
-    control_matrices, control_values = _matrix_control_arrays(
-        control_matrix,
-        controls,
-        n_transitions,
-        n_state,
-    )
-    if offsets is not None:
-        _require_finite(offsets, "control_offsets")
-    if control_matrices is not None:
-        _require_finite(control_matrices, "control_matrix")
-    if control_values is not None:
-        _require_finite(control_values, "controls")
     filtered_means = np.empty((n_times, n_state), dtype=float)
     filtered_covariances = np.empty((n_times, n_state, n_state), dtype=float)
     predicted_means = np.empty((n_times, n_state), dtype=float)
@@ -193,16 +176,11 @@ def kalman_filter(
             f = _transition_at(transitions, step)
             q = _transition_at(process_covariances, step)
             transition_matrices[step] = f
-            offset = _control_offset_at(offsets, step, n_state)
-            offset = offset + _matrix_control_at(
-                control_matrices, control_values, step, n_state
-            )
             predicted_means[k], predicted_covariances[k] = _predict_state_unchecked(
                 filtered_means[k - 1],
                 filtered_covariances[k - 1],
                 f,
                 q,
-                control_offset=offset,
             )
 
         h = _observation_at(observation_matrices, k)
@@ -236,8 +214,6 @@ def predict_state(
     filtered_covariance: Array,
     transition_matrix: Array,
     process_covariance: Array,
-    *,
-    control_offset: Array | None = None,
 ) -> tuple[Array, Array]:
     """Project one filtered state forward by one time interval."""
 
@@ -257,15 +233,8 @@ def predict_state(
     _require_covariance(covariance, "filtered_covariance")
     _require_finite(transition, "transition_matrix")
     _require_covariance(process, "process_covariance")
-    offset = (
-        np.zeros(state_size, dtype=float)
-        if control_offset is None
-        else np.asarray(control_offset, dtype=float)
-    )
-    _require_shape(offset, (state_size,), "control_offset")
-    _require_finite(offset, "control_offset")
     return _predict_state_unchecked(
-        mean, covariance, transition, process, control_offset=offset
+        mean, covariance, transition, process
     )
 
 
@@ -274,12 +243,10 @@ def _predict_state_unchecked(
     filtered_covariance: Array,
     transition_matrix: Array,
     process_covariance: Array,
-    *,
-    control_offset: Array,
 ) -> tuple[Array, Array]:
     """Project an already-validated state without repeated boundary checks."""
 
-    predicted_mean = transition_matrix @ filtered_mean + control_offset
+    predicted_mean = transition_matrix @ filtered_mean
     predicted_covariance = _symmetrize(
         transition_matrix @ filtered_covariance @ transition_matrix.T
         + process_covariance
@@ -403,7 +370,6 @@ def kalman_step(
     observation: Array,
     observation_matrix: Array,
     observation_covariance: Array,
-    control_offset: Array | None = None,
 ) -> FilterStep:
     """Predict and update one timestamp, returning an immutable filter record."""
 
@@ -412,7 +378,6 @@ def kalman_step(
         previous_filtered_covariance,
         transition_matrix,
         process_covariance,
-        control_offset=control_offset,
     )
     observation_values, observation_model, measurement_covariance = (
         _validated_update_inputs(
@@ -562,96 +527,12 @@ def _observation_at(value: np.ndarray, time_index: int) -> np.ndarray:
     return value if value.ndim == 2 else value[time_index]
 
 
-def _control_offset_array(
-    control_offsets: np.ndarray | None,
-    n_transitions: int,
-    n_state: int,
-) -> np.ndarray | None:
-    """Normalize and validate shared or per-transition control offsets."""
-
-    if control_offsets is None:
-        return None
-
-    offsets = np.asarray(control_offsets, dtype=float)
-    if offsets.ndim == 1:
-        _require_shape(offsets, (n_state,), "control_offsets")
-        return offsets
-    per_transition_shape = (n_transitions, n_state)
-    if offsets.shape == per_transition_shape:
-        return offsets
-    raise ValueError(
-        "control_offsets must have shape "
-        f"({n_state},) or {per_transition_shape}"
-    )
 
 
-def _control_offset_at(
-    control_offsets: np.ndarray | None,
-    step: int,
-    n_state: int,
-) -> np.ndarray:
-    """Return the shared or selected control offset."""
-
-    if control_offsets is None:
-        return np.zeros(n_state, dtype=float)
-    return control_offsets if control_offsets.ndim == 1 else control_offsets[step]
 
 
-def _matrix_control_arrays(
-    control_matrix: np.ndarray | None,
-    controls: np.ndarray | None,
-    n_transitions: int,
-    n_state: int,
-) -> tuple[np.ndarray | None, np.ndarray | None]:
-    """Normalize and validate matrix-control inputs."""
-
-    if control_matrix is None and controls is None:
-        return None, None
-    if control_matrix is None or controls is None:
-        raise ValueError("control_matrix and controls must be supplied together")
-
-    u = np.asarray(controls, dtype=float)
-    b = np.asarray(control_matrix, dtype=float)
-    if b.ndim == 2 and b.shape[0] == n_state:
-        n_control = b.shape[1]
-    elif b.ndim == 3 and b.shape[:2] == (n_transitions, n_state):
-        n_control = b.shape[2]
-    else:
-        raise ValueError(
-            "control_matrix must have shape (n_state, n_control) or "
-            "(n_transitions, n_state, n_control)"
-        )
-
-    if u.ndim == 1:
-        if u.shape[0] == n_transitions and n_control == 1:
-            u = u.reshape(n_transitions, 1)
-        elif u.shape != (n_control,):
-            raise ValueError(
-                "controls must have shape (n_control,) or "
-                "(n_transitions, n_control)"
-            )
-    elif u.shape != (n_transitions, n_control):
-        raise ValueError(
-            "controls must have shape (n_control,) or "
-            "(n_transitions, n_control)"
-        )
-
-    return b, u
 
 
-def _matrix_control_at(
-    control_matrix: np.ndarray | None,
-    controls: np.ndarray | None,
-    step: int,
-    n_state: int,
-) -> np.ndarray:
-    """Return the state change caused by a control input."""
-
-    if control_matrix is None or controls is None:
-        return np.zeros(n_state, dtype=float)
-    matrix = control_matrix if control_matrix.ndim == 2 else control_matrix[step]
-    control = controls if controls.ndim == 1 else controls[step]
-    return matrix @ control
 
 
 def _require_shape(
