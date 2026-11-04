@@ -47,12 +47,31 @@ class SmoothedStep:
         object.__setattr__(self, "smoothing_flag", smoothing_flag)
 
 
+def _rts_gains(
+    filtered_covariances: Array,
+    predicted_covariances: Array,
+    transition_matrices: Array,
+) -> Array:
+    """Compute forward-only RTS gains into one C-contiguous float array."""
+
+    n_times, n_state, _ = filtered_covariances.shape
+    gains = np.empty((max(n_times - 1, 0), n_state, n_state), dtype=float)
+    for k in range(n_times - 2, -1, -1):
+        gains[k] = _solve_right(
+            predicted_covariances[k + 1],
+            filtered_covariances[k] @ transition_matrices[k].T,
+        )
+    return gains
+
+
 def _rts_smooth_arrays(
     filtered_means: Array,
     filtered_covariances: Array,
     predicted_means: Array,
     predicted_covariances: Array,
     transition_matrices: Array,
+    *,
+    gains: Array | None = None,
 ) -> tuple[Array, Array, Array]:
     """Run the existing RTS equations over the supplied active window."""
 
@@ -68,18 +87,21 @@ def _rts_smooth_arrays(
     if transition_matrices.shape != (max(n_times - 1, 0), n_state, n_state):
         raise ValueError("transition_matrices has an incompatible shape")
 
+    gains = (
+        _rts_gains(filtered_covariances, predicted_covariances, transition_matrices)
+        if gains is None
+        else gains
+    )
+    if gains.shape != (n_times - 1, n_state, n_state):
+        raise ValueError("gains has an incompatible shape")
+
     smoothed_means = np.empty_like(filtered_means)
     smoothed_covariances = np.empty_like(filtered_covariances)
-    smoother_gains = np.empty((max(n_times - 1, 0), n_state, n_state), dtype=float)
     smoothed_means[-1] = filtered_means[-1]
     smoothed_covariances[-1] = filtered_covariances[-1]
 
     for k in range(n_times - 2, -1, -1):
-        gain = _solve_right(
-            predicted_covariances[k + 1],
-            filtered_covariances[k] @ transition_matrices[k].T,
-        )
-        smoother_gains[k] = gain
+        gain = gains[k]
         smoothed_means[k] = filtered_means[k] + gain @ (
             smoothed_means[k + 1] - predicted_means[k + 1]
         )
@@ -90,7 +112,25 @@ def _rts_smooth_arrays(
             @ gain.T
         )
 
-    return smoothed_means, smoothed_covariances, smoother_gains
+    return smoothed_means, smoothed_covariances, gains
+
+
+def _rts_smooth_means(
+    filtered_means: Array, predicted_means: Array, gains: Array
+) -> Array:
+    """Smooth a nonempty batch window without unused covariance recursion."""
+
+    n_times, n_state = filtered_means.shape
+    if gains.shape != (max(n_times - 1, 0), n_state, n_state):
+        raise ValueError("gains has an incompatible shape")
+
+    smoothed_means = np.empty_like(filtered_means)
+    smoothed_means[-1] = filtered_means[-1]
+    for k in range(len(filtered_means) - 2, -1, -1):
+        smoothed_means[k] = filtered_means[k] + gains[k] @ (
+            smoothed_means[k + 1] - predicted_means[k + 1]
+        )
+    return smoothed_means
 
 
 def smooth_filter_steps(steps: Iterable[FilterStep]) -> tuple[SmoothedStep, ...]:
@@ -98,6 +138,14 @@ def smooth_filter_steps(steps: Iterable[FilterStep]) -> tuple[SmoothedStep, ...]
 
     An empty input produces an empty tuple. The input steps are not changed.
     """
+
+    return _smooth_filter_steps(steps)
+
+
+def _smooth_filter_steps(
+    steps: Iterable[FilterStep], *, gains: Array | None = None
+) -> tuple[SmoothedStep, ...]:
+    """Build generic smoothed records, optionally reusing active-window gains."""
 
     active = tuple(steps)
     if not active:
@@ -118,6 +166,7 @@ def smooth_filter_steps(steps: Iterable[FilterStep]) -> tuple[SmoothedStep, ...]
         predicted_means,
         predicted_covariances,
         transitions,
+        gains=gains,
     )
     return tuple(
         SmoothedStep(
@@ -149,6 +198,7 @@ class OnlineFixedLagRTS:
         )
         self._lag = lag
         self._steps: deque[FilterStep] = deque(maxlen=window_size)
+        self._gains: deque[Array] = deque(maxlen=window_size - 1)
         self._last_finalized_steps: tuple[FilterStep, ...] = ()
 
     @property
@@ -186,7 +236,6 @@ class OnlineFixedLagRTS:
 
         if self._steps and to_utc(step.timestamp) <= to_utc(self._steps[-1].timestamp):
             raise ValueError("filter-step timestamps must be strictly increasing")
-        active = (*self._steps, step)
         lag_seconds = self._lag.total_seconds()
         eligible_count = 0
         # The new step has age zero and cannot finalize under a positive lag.
@@ -198,27 +247,50 @@ class OnlineFixedLagRTS:
                 eligible_count += 1
             else:
                 break
+        if eligible_count == 0 and len(self._steps) == self.max_window_steps:
+            raise OverflowError(
+                "active RTS window reached max_window_steps before a state finalized"
+            )
+
+        # Compute before mutating either deque. A releasing full window needs
+        # its complete gain sequence until smoothing has succeeded.
+        gain = None
+        if self._steps:
+            # np.stack preserves input layout; canonicalize before caching.
+            gain = _solve_right(
+                step.predicted_covariance,
+                self._steps[-1].filtered_covariance @ step.transition_matrix.T,
+            ).copy(order="C")
         if eligible_count == 0:
-            if len(self._steps) == self.max_window_steps:
-                raise OverflowError(
-                    "active RTS window reached max_window_steps before "
-                    "a state finalized"
-                )
             self._steps.append(step)
+            if gain is not None:
+                self._gains.append(gain)
             self._last_finalized_steps = ()
             return ()
 
-        smoothed = smooth_filter_steps(active)
+        active = (*self._steps, step)
+        gains = (*self._gains, gain)
+        smoothed = _smooth_filter_steps(active, gains=np.stack(gains))
         finalized = smoothed[:eligible_count]
         self._last_finalized_steps = active[:eligible_count]
         self._steps.clear()
         self._steps.extend(active[eligible_count:])
+        self._gains.clear()
+        self._gains.extend(gains[eligible_count:])
         return finalized
 
     def provisional(self) -> tuple[SmoothedStep, ...]:
         """Return lag-window estimates without finalizing or retaining copies."""
 
-        return smooth_filter_steps(self._steps)
+        if not self._steps:
+            return ()
+        n_state = self._steps[0].filtered_mean.size
+        gains = (
+            np.stack(self._gains)
+            if self._gains
+            else np.empty((0, n_state, n_state), dtype=float)
+        )
+        return _smooth_filter_steps(self._steps, gains=gains)
 
     def active_steps(self) -> tuple[FilterStep, ...]:
         """Return active forward-filter steps in timestamp order."""
@@ -229,4 +301,5 @@ class OnlineFixedLagRTS:
         """Discard all active forward-filter steps."""
 
         self._steps.clear()
+        self._gains.clear()
         self._last_finalized_steps = ()

@@ -25,7 +25,12 @@ from .models import ReservoirStateSpaceModel
 from .pipeline import ObservationLike, OnlineInflowPipeline
 from .reservoir_backend import ReservoirBackend
 from .reservoir_config import ReservoirConfig
-from .rts import OnlineFixedLagRTS, _rts_smooth_arrays
+from .rts import (
+    OnlineFixedLagRTS,
+    _rts_gains,
+    _rts_smooth_arrays,
+    _rts_smooth_means,
+)
 from .time_utils import to_utc, validate_timestamp_precision
 from .units import UnitSystem
 
@@ -919,19 +924,16 @@ def _process_reservoir_batch_raw(
     )
     timestamps = index[positions]
     observations = np.column_stack((storage[positions], discharge[positions]))
-    elapsed = np.asarray(
-        [
-            (timestamps[position] - timestamps[position - 1]).total_seconds()
-            for position in range(1, len(timestamps))
-        ],
-        dtype=float,
-    )
+    elapsed = _batch_elapsed_seconds(timestamps)
+    distinct_elapsed, inverse = np.unique(elapsed, return_inverse=True)
     transitions = np.asarray(
-        [backend.model.transition_matrix(seconds) for seconds in elapsed], dtype=float
-    )
+        [backend.model.transition_matrix(seconds) for seconds in distinct_elapsed],
+        dtype=float,
+    )[inverse]
     process_covariances = np.asarray(
-        [backend.model.process_covariance(seconds) for seconds in elapsed], dtype=float
-    )
+        [backend.model.process_covariance(seconds) for seconds in distinct_elapsed],
+        dtype=float,
+    )[inverse]
     initial_mean = np.array(
         [
             storage[first],
@@ -1021,9 +1023,54 @@ def _initialization_positions(
     return first, int(valid_storage[1])
 
 
+def _batch_timestamp_microseconds(
+    timestamps: pandas.DatetimeIndex,
+) -> np.ndarray | None:
+    """Use exact microseconds where the original timestamp range permits it."""
+
+    if not isinstance(timestamps, pandas.DatetimeIndex):
+        return None
+    # Coarser index units can represent epochs and spans wider than int64 us.
+    try:
+        values = timestamps.as_unit("us").asi8
+    except pandas.errors.OutOfBoundsDatetime:
+        return None
+    if len(values) > 1 and int(values[-1]) - int(values[0]) > np.iinfo(np.int64).max:
+        return None
+    return values
+
+
+def _batch_elapsed_seconds(timestamps: pandas.DatetimeIndex) -> np.ndarray:
+    """Vectorize pandas' whole-seconds-plus-microseconds conversion order."""
+
+    timestamp_us = _batch_timestamp_microseconds(timestamps)
+    if timestamp_us is None:
+        return np.asarray(
+            [
+                (timestamps[k] - timestamps[k - 1]).total_seconds()
+                for k in range(1, len(timestamps))
+            ],
+            dtype=float,
+        )
+    elapsed_us = np.diff(timestamp_us)
+    seconds, microseconds = np.divmod(elapsed_us, 1_000_000)
+    return seconds + microseconds / 1_000_000
+
+
 def _validate_batch_timestamps(index: pandas.DatetimeIndex) -> None:
     """Apply the streaming timestamp contract before batch computation."""
 
+    if (
+        isinstance(index, pandas.DatetimeIndex)
+        and index.tz is not None
+        and not index.hasnans
+        and np.all(index.asi8[1:] > index.asi8[:-1])
+        and not np.any(index.nanosecond)
+    ):
+        return
+
+    # Keep the scalar path for malformed indexes so the first failing row,
+    # validation order, and error messages stay identical to streaming.
     previous_utc: datetime | None = None
     for timestamp in index:
         timestamp_utc = to_utc(timestamp)
@@ -1046,11 +1093,33 @@ def _write_fixed_lag_inflow_revisions(
 ) -> None:
     """Write absolute fixed-lag RTS inflow replacements for finalized states."""
 
+    gains = _rts_gains(
+        filtered.filtered_covariances,
+        filtered.predicted_covariances,
+        filtered.transition_matrices,
+    )
+    # Pandas lags may carry sub-microsecond remainders or wider resolutions.
+    timestamp_us = (
+        None
+        if getattr(smoothing_lag, "nanoseconds", 0)
+        else _batch_timestamp_microseconds(timestamps)
+    )
+    lag_us = 0
+    if timestamp_us is not None:
+        try:
+            lag_us = smoothing_lag // timedelta(microseconds=1)
+        except pandas.errors.OutOfBoundsTimedelta:
+            timestamp_us = None
     active: deque[int] = deque()
     for current in range(len(timestamps)):
         eligible = 0
         for candidate in active:
-            if timestamps[current] - timestamps[candidate] >= smoothing_lag:
+            ready = (
+                timestamps[current] - timestamps[candidate] >= smoothing_lag
+                if timestamp_us is None
+                else int(timestamp_us[current]) - int(timestamp_us[candidate]) >= lag_us
+            )
+            if ready:
                 eligible += 1
             else:
                 break
@@ -1065,13 +1134,21 @@ def _write_fixed_lag_inflow_revisions(
 
         window = np.fromiter(active, dtype=int)
         window = np.append(window, current)
-        smoothed_means, smoothed_covariances, _ = _rts_smooth_arrays(
-            filtered.filtered_means[window],
-            filtered.filtered_covariances[window],
-            filtered.predicted_means[window],
-            filtered.predicted_covariances[window],
-            filtered.transition_matrices[window[1:] - 1],
-        )
+        if include_uncertainty:
+            smoothed_means, smoothed_covariances, _ = _rts_smooth_arrays(
+                filtered.filtered_means[window],
+                filtered.filtered_covariances[window],
+                filtered.predicted_means[window],
+                filtered.predicted_covariances[window],
+                filtered.transition_matrices[window[1:] - 1],
+                gains=gains[window[0] : current],
+            )
+        else:
+            smoothed_means = _rts_smooth_means(
+                filtered.filtered_means[window],
+                filtered.predicted_means[window],
+                gains[window[0] : current],
+            )
         finalized = window[:eligible]
         output_positions = positions[finalized]
         result["revised_inflow"][output_positions] = smoothed_means[:eligible, 1]
