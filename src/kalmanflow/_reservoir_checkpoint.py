@@ -11,8 +11,8 @@ from math import isfinite
 import numpy as np
 
 from .kalman import FilterStep
+from .observations import Observation
 from .pipeline import (
-    InitializationObservation,
     PipelineInitializationPhase,
     PipelineState,
 )
@@ -120,11 +120,11 @@ def decode_reservoir_checkpoint(
     has_last_timestamp = reader.read_byte()
     last_input_timestamp = _unpack_timestamp(reader) if has_last_timestamp else None
 
-    initial_observation: InitializationObservation | None = None
+    initial_observation: Observation | None = None
     filter_anchor: FilterStep | None = None
-    unfinished_observations: tuple[InitializationObservation, ...] = ()
+    unfinished_observations: tuple[Observation, ...] = ()
     if phase is PipelineInitializationPhase.WAITING_FOR_SECOND:
-        initial_observation = InitializationObservation(
+        initial_observation = Observation(
             timestamp=_unpack_timestamp(reader),
             storage=_unpack_float(reader),
             discharge=_unpack_float(reader),
@@ -190,7 +190,7 @@ def _decode_anchor(reader: _Reader) -> FilterStep:
 
 
 def _encode_observations(
-    observations: tuple[InitializationObservation, ...],
+    observations: tuple[Observation, ...],
     origin: datetime,
 ) -> bytes:
     """Encode raw active-window observations using UTC microsecond deltas."""
@@ -210,10 +210,10 @@ def _encode_observations(
 def _decode_observations(
     reader: _Reader,
     origin: datetime,
-) -> tuple[InitializationObservation, ...]:
+) -> tuple[Observation, ...]:
     """Decode raw active-window observations and their compact missing masks."""
 
-    observations: list[InitializationObservation] = []
+    observations: list[Observation] = []
     previous_timestamp = origin
     for _ in range(_decode_observation_count(reader)):
         delta = _decode_varint(reader)
@@ -226,7 +226,7 @@ def _decode_observations(
 
 
 def _encode_observations_from_first(
-    observations: tuple[InitializationObservation, ...],
+    observations: tuple[Observation, ...],
 ) -> bytes:
     """Encode start-up observations forward from their first timestamp."""
 
@@ -240,7 +240,7 @@ def _encode_observations_from_first(
 
 def _decode_observations_from_first(
     reader: _Reader,
-) -> tuple[InitializationObservation, ...]:
+) -> tuple[Observation, ...]:
     """Decode forward-ordered start-up observations."""
 
     return _decode_observations(reader, _unpack_timestamp(reader))
@@ -248,7 +248,7 @@ def _decode_observations_from_first(
 
 def _encode_observation(
     result: bytearray,
-    observation: InitializationObservation,
+    observation: Observation,
     delta: int,
 ) -> None:
     """Append one compact observation record."""
@@ -276,13 +276,13 @@ def _decode_observation_count(reader: _Reader) -> int:
 def _decode_observation(
     reader: _Reader,
     timestamp: datetime,
-) -> InitializationObservation:
+) -> Observation:
     """Read one compact observation record."""
 
     missing_mask = reader.read_byte()
     storage = float("nan") if missing_mask & 0b01 else _unpack_float(reader)
     discharge = float("nan") if missing_mask & 0b10 else _unpack_float(reader)
-    return InitializationObservation(timestamp, storage, discharge)
+    return Observation(timestamp, storage, discharge)
 
 
 def _finite_or_none(value: float) -> float | None:

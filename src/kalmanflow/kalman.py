@@ -7,9 +7,15 @@ from datetime import datetime
 
 import numpy as np
 
-from ._validation import readonly_array
+from ._validation import (
+    COVARIANCE_PSD_RTOL,
+    COVARIANCE_SYMMETRY_ATOL,
+    COVARIANCE_SYMMETRY_RTOL,
+    readonly_array,
+    require_covariance,
+)
 from .flags import OutputFlag
-from .time_utils import validate_timestamp_precision
+from .time_utils import aware_timestamp
 
 Array = np.ndarray
 
@@ -27,11 +33,7 @@ class FilterStep:
     prediction_flag: OutputFlag = OutputFlag.NORMAL
 
     def __post_init__(self) -> None:
-        if not isinstance(self.timestamp, datetime):
-            raise TypeError("timestamp must be a datetime instance")
-        if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
-            raise ValueError("timestamp must be timezone-aware")
-        validate_timestamp_precision(self.timestamp)
+        aware_timestamp(self.timestamp)
 
         prediction_flag = OutputFlag(self.prediction_flag)
         if prediction_flag not in {OutputFlag.NORMAL, OutputFlag.PREDICTED}:
@@ -63,8 +65,8 @@ class FilterStep:
                 raise ValueError(
                     f"{name} must have shape {expected_matrix_shape}; got {value.shape}"
                 )
-        _require_covariance(filtered_covariance, "filtered_covariance")
-        _require_covariance(predicted_covariance, "predicted_covariance")
+        require_covariance(filtered_covariance, name="filtered_covariance")
+        require_covariance(predicted_covariance, name="predicted_covariance")
         _require_finite(transition_matrix, "transition_matrix")
 
         object.__setattr__(self, "filtered_mean", filtered_mean)
@@ -124,7 +126,7 @@ def kalman_filter(
     _require_finite(x0, "initial_mean")
     n_state = x0.shape[0]
     _require_shape(p0, (n_state, n_state), "initial_covariance")
-    _require_covariance(p0, "initial_covariance")
+    require_covariance(p0, name="initial_covariance")
 
     n_transitions = max(n_times - 1, 0)
     transitions = _transition_array(
@@ -230,9 +232,9 @@ def predict_state(
     _require_shape(covariance, (state_size, state_size), "filtered_covariance")
     _require_shape(transition, (state_size, state_size), "transition_matrix")
     _require_shape(process, (state_size, state_size), "process_covariance")
-    _require_covariance(covariance, "filtered_covariance")
+    require_covariance(covariance, name="filtered_covariance")
     _require_finite(transition, "transition_matrix")
-    _require_covariance(process, "process_covariance")
+    require_covariance(process, name="process_covariance")
     return _predict_state_unchecked(
         mean, covariance, transition, process
     )
@@ -427,7 +429,7 @@ def _validated_update_inputs(
 
     covariance = np.asarray(predicted_covariance, dtype=float)
     _require_shape(covariance, (mean.size, mean.size), "predicted_covariance")
-    _require_covariance(covariance, "predicted_covariance")
+    require_covariance(covariance, name="predicted_covariance")
 
     values = np.asarray(observation, dtype=float)
     if values.ndim == 0:
@@ -447,7 +449,7 @@ def _validated_update_inputs(
         "observation_covariance",
     )
     _require_finite(model, "observation_matrix")
-    _require_covariance(measurement_covariance, "observation_covariance")
+    require_covariance(measurement_covariance, name="observation_covariance")
     return values, model, measurement_covariance
 
 
@@ -558,36 +560,29 @@ def _require_no_infinity(array: np.ndarray, name: str) -> None:
         raise ValueError(f"{name} must contain only finite values or NaN")
 
 
-def _require_covariance(array: np.ndarray, name: str) -> None:
-    """Validate one finite, symmetric, positive-semidefinite covariance."""
-
-    _require_finite(array, name)
-    if not np.allclose(array, array.T, rtol=1e-10, atol=1e-12):
-        raise ValueError(f"{name} must be symmetric")
-    eigenvalues = np.linalg.eigvalsh(array)
-    tolerance = 1e-12 * max(1.0, float(np.max(np.abs(eigenvalues))))
-    if float(np.min(eigenvalues)) < -tolerance:
-        raise ValueError(f"{name} must be positive semidefinite")
 
 
 def _require_covariance_stack(array: np.ndarray, name: str) -> None:
     """Validate a shared covariance or every member of a time-varying stack."""
 
     if array.ndim == 2:
-        _require_covariance(array, name)
+        require_covariance(array, name=name)
         return
     if not len(array):
         return
     _require_finite(array, name)
     symmetric = np.all(
-        np.isclose(array, np.swapaxes(array, -1, -2), rtol=1e-10, atol=1e-12),
+        np.isclose(
+            array, np.swapaxes(array, -1, -2),
+            rtol=COVARIANCE_SYMMETRY_RTOL, atol=COVARIANCE_SYMMETRY_ATOL,
+        ),
         axis=(1, 2),
     )
     if not np.all(symmetric):
         position = int(np.flatnonzero(~symmetric)[0])
         raise ValueError(f"{name}[{position}] must be symmetric")
     eigenvalues = np.linalg.eigvalsh(array)
-    tolerance = 1e-12 * np.maximum(
+    tolerance = COVARIANCE_PSD_RTOL * np.maximum(
         1.0, np.max(np.abs(eigenvalues), axis=1)
     )
     valid = np.min(eigenvalues, axis=1) >= -tolerance

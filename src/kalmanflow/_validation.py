@@ -9,6 +9,28 @@ from operator import index
 import numpy as np
 from numpy.typing import ArrayLike
 
+COVARIANCE_SYMMETRY_RTOL = 1e-10
+COVARIANCE_SYMMETRY_ATOL = 1e-12
+COVARIANCE_PSD_RTOL = 1e-12
+
+
+def require_covariance(array: np.ndarray, *, name: str) -> None:
+    """Require finite, symmetric, positive-semidefinite covariance values."""
+
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values")
+    if not np.allclose(
+        array,
+        array.T,
+        rtol=COVARIANCE_SYMMETRY_RTOL,
+        atol=COVARIANCE_SYMMETRY_ATOL,
+    ):
+        raise ValueError(f"{name} must be symmetric")
+    eigenvalues = np.linalg.eigvalsh(array)
+    tolerance = COVARIANCE_PSD_RTOL * max(1.0, float(np.max(np.abs(eigenvalues))))
+    if float(np.min(eigenvalues)) < -tolerance:
+        raise ValueError(f"{name} must be positive semidefinite")
+
 
 def readonly_array(value: ArrayLike) -> np.ndarray:
     """Return a private, read-only floating-point array."""
@@ -30,14 +52,7 @@ def covariance_array(
     array = np.asarray(value, dtype=float).copy()
     if array.shape != shape:
         raise ValueError(f"{name} must have shape {shape}; got {array.shape}")
-    if not np.all(np.isfinite(array)) or not np.allclose(
-        array, array.T, rtol=1e-10, atol=1e-12
-    ):
-        raise ValueError(f"{name} must be finite and symmetric")
-    eigenvalues = np.linalg.eigvalsh(array)
-    tolerance = 1e-12 * max(1.0, float(np.max(np.abs(eigenvalues))))
-    if np.min(eigenvalues) < -tolerance:
-        raise ValueError(f"{name} must be positive semidefinite")
+    require_covariance(array, name=name)
     if positive_diagonal and np.any(np.diag(array) <= 0.0):
         raise ValueError(f"{name} diagonal entries must be strictly positive")
     array.setflags(write=False)

@@ -30,6 +30,17 @@ def validate_timestamp_precision(timestamp: datetime) -> None:
         )
 
 
+def aware_timestamp(value: object) -> datetime:
+    """Return ``value`` unchanged after the shared timestamp checks."""
+
+    if not isinstance(value, datetime):
+        raise TypeError("timestamp must be a datetime instance")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("timestamp must be timezone-aware")
+    validate_timestamp_precision(value)
+    return value
+
+
 def elapsed_seconds(
     later: datetime, earlier: datetime, *, allow_zero: bool = False
 ) -> float:

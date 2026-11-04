@@ -20,7 +20,7 @@ from kalmanflow import (
     smooth_filter_steps,
 )
 from kalmanflow.kalman import FilterStep
-from kalmanflow.pipeline import InitializationObservation
+from kalmanflow.observations import Observation
 
 Q = np.diag([0.5, 0.1, 0.2])
 R = np.diag([0.25, 0.5])
@@ -262,8 +262,8 @@ class TestPipelineTimestampBoundaries:
         )
 
         first_step, second_step = backend.initialize(
-            InitializationObservation(first_timestamp, 100.0, 0.0),
-            InitializationObservation(second_timestamp, 101.0, 0.0),
+            Observation(first_timestamp, 100.0, 0.0),
+            Observation(second_timestamp, 101.0, 0.0),
         )
 
         assert first_step.predicted_mean[1] == 0.0

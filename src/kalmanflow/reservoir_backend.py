@@ -11,7 +11,7 @@ import numpy as np
 from ._validation import covariance_array
 from .kalman import initial_filter_step, kalman_step
 from .models import StateSpaceModel
-from .pipeline import InitializationObservation
+from .observations import Observation
 from .time_utils import elapsed_seconds
 
 
@@ -44,8 +44,8 @@ class ReservoirBackend:
 
     def initialize(
         self,
-        first: InitializationObservation,
-        second: InitializationObservation,
+        first: Observation,
+        second: Observation,
     ) -> tuple[Any, Any]:
         """Create the first two filter steps from the starting observations."""
 

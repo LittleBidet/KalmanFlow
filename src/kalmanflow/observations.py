@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from ._validation import measurement_value
-from .time_utils import validate_timestamp_precision
+from .time_utils import aware_timestamp
 
 
 @dataclass(frozen=True)
@@ -24,11 +24,7 @@ class Observation:
     discharge: float
 
     def __post_init__(self) -> None:
-        if not isinstance(self.timestamp, datetime):
-            raise TypeError("timestamp must be a datetime instance")
-        if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
-            raise ValueError("timestamp must be timezone-aware")
-        validate_timestamp_precision(self.timestamp)
+        aware_timestamp(self.timestamp)
         object.__setattr__(
             self, "storage", measurement_value(self.storage, name="storage")
         )

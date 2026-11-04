@@ -72,7 +72,7 @@ class TestReservoirModelBoundaries:
             _model(q_continuous=np.eye(2))
 
     def test_q_must_be_symmetric(self) -> None:
-        with pytest.raises(ValueError, match="finite and symmetric"):
+        with pytest.raises(ValueError, match="must be symmetric"):
             _model(
                 q_continuous=np.array(
                     [[1.0, 2.0, 0.0], [3.0, 4.0, 0.0], [0.0, 0.0, 1.0]]

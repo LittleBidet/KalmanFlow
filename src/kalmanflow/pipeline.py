@@ -9,33 +9,13 @@ from math import isfinite
 from typing import Protocol, TypeVar
 
 from ._validation import bounded_integer, measurement_value
-from .time_utils import to_utc, validate_timestamp_precision
+from .observations import Observation
+from .time_utils import aware_timestamp, to_utc
 
 FilterStep = TypeVar("FilterStep")
 SmoothedState = TypeVar("SmoothedState")
 
 
-@dataclass(frozen=True)
-class InitializationObservation:
-    """A storage/outflow observation used to initialize a stream."""
-
-    timestamp: datetime
-    storage: float
-    discharge: float
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.timestamp, datetime):
-            raise TypeError("timestamp must be a datetime instance")
-        to_utc(self.timestamp)
-        validate_timestamp_precision(self.timestamp)
-        object.__setattr__(
-            self, "storage", measurement_value(self.storage, name="storage")
-        )
-        object.__setattr__(
-            self,
-            "discharge",
-            measurement_value(self.discharge, name="discharge"),
-        )
 
 
 class PipelineInitializationPhase(IntEnum):
@@ -59,9 +39,9 @@ class PipelineState[FilterStep]:
 
     phase: PipelineInitializationPhase
     last_input_timestamp: datetime | None
-    initial_observation: InitializationObservation | None
+    initial_observation: Observation | None
     filter_anchor: FilterStep | None
-    unfinished_observations: tuple[InitializationObservation, ...]
+    unfinished_observations: tuple[Observation, ...]
 
 
 class PipelineBackend(Protocol[FilterStep]):
@@ -73,8 +53,8 @@ class PipelineBackend(Protocol[FilterStep]):
 
     def initialize(
         self,
-        first: InitializationObservation,
-        second: InitializationObservation,
+        first: Observation,
+        second: Observation,
     ) -> tuple[FilterStep, FilterStep]:
         """Return forward steps for the two observations that start a stream."""
 
@@ -184,11 +164,11 @@ class OnlineInflowPipeline:
                 raise ValueError(
                     "max_window_steps must match smoother.max_window_steps"
                 )
-        self._initial_observation: InitializationObservation | None = None
+        self._initial_observation: Observation | None = None
         self._last_input_timestamp: datetime | None = None
         self._last_filter_step: FilterStep | None = None
         self._filter_anchor: FilterStep | None = None
-        self._unfinished_observations: list[InitializationObservation] = []
+        self._unfinished_observations: list[Observation] = []
 
     @property
     def initialized(self) -> bool:
@@ -250,7 +230,7 @@ class OnlineInflowPipeline:
         )
         finalized = self._add_step(
             step,
-            observation=InitializationObservation(timestamp, storage, discharge),
+            observation=Observation(timestamp, storage, discharge),
         )
         self._last_filter_step = step
         self._last_input_timestamp = timestamp
@@ -458,7 +438,7 @@ class OnlineInflowPipeline:
                 raise ValueError(
                     "the first valid storage observation needs a finite discharge value"
                 )
-            self._initial_observation = InitializationObservation(
+            self._initial_observation = Observation(
                 timestamp=timestamp,
                 storage=storage,
                 discharge=discharge,
@@ -470,7 +450,7 @@ class OnlineInflowPipeline:
             )
 
         first = self._initial_observation
-        second = InitializationObservation(
+        second = Observation(
             timestamp=timestamp,
             storage=storage,
             discharge=discharge,
@@ -494,7 +474,7 @@ class OnlineInflowPipeline:
         self,
         step: FilterStep,
         *,
-        observation: InitializationObservation,
+        observation: Observation,
     ) -> tuple[SmoothedState, ...]:
         """Add one filter step and keep only raw data needed for replay."""
 
@@ -519,9 +499,7 @@ class OnlineInflowPipeline:
     def _validate_timestamp(self, timestamp: datetime) -> None:
         """Check that a new timestamp is aware and later than the previous one."""
 
-        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-            raise ValueError("timestamp must be timezone-aware")
-        validate_timestamp_precision(timestamp)
+        aware_timestamp(timestamp)
         if self._last_input_timestamp is not None and to_utc(timestamp) <= to_utc(
             self._last_input_timestamp
         ):
@@ -529,7 +507,6 @@ class OnlineInflowPipeline:
 
 
 __all__ = [
-    "InitializationObservation",
     "ObservationLike",
     "OnlineInflowPipeline",
     "PipelineInitializationPhase",

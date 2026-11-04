@@ -31,7 +31,7 @@ from .rts import (
     _rts_smooth_arrays,
     _rts_smooth_means,
 )
-from .time_utils import to_utc, validate_timestamp_precision
+from .time_utils import aware_timestamp, to_utc, validate_timestamp_precision
 from .units import UnitSystem
 
 _UNSET: Final = object()
@@ -121,11 +121,7 @@ class ReservoirFlowEstimate:
     standard_deviation: float | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.timestamp, datetime):
-            raise TypeError("timestamp must be a datetime instance")
-        if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
-            raise ValueError("timestamp must be timezone-aware")
-        validate_timestamp_precision(self.timestamp)
+        aware_timestamp(self.timestamp)
         prediction_flag = OutputFlag(self.prediction_flag)
         if prediction_flag not in {OutputFlag.NORMAL, OutputFlag.PREDICTED}:
             raise ValueError("prediction_flag must be NORMAL or PREDICTED")
@@ -464,10 +460,7 @@ class OnlineReservoirInflow:
             else None
         )
         for timestamp, _, _ in values:
-            if not isinstance(timestamp, datetime):
-                raise TypeError("timestamp must be a datetime instance")
-            timestamp_utc = to_utc(timestamp)
-            validate_timestamp_precision(timestamp)
+            timestamp_utc = to_utc(aware_timestamp(timestamp))
             if previous_utc is not None and timestamp_utc <= previous_utc:
                 raise ValueError("observation timestamps must be strictly increasing")
             previous_utc = timestamp_utc
@@ -562,10 +555,7 @@ def _validated_process_values(
 ) -> tuple[datetime, float, float]:
     """Validate one structural observation before it can mutate a stream."""
 
-    if not isinstance(timestamp, datetime):
-        raise TypeError("timestamp must be a datetime instance")
-    to_utc(timestamp)
-    validate_timestamp_precision(timestamp)
+    timestamp = aware_timestamp(timestamp)
     return (
         timestamp,
         measurement_value(storage, name="storage"),

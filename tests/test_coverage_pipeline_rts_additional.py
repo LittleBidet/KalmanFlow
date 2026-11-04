@@ -11,8 +11,8 @@ import pytest
 from kalmanflow import OnlineFixedLagRTS, OnlineInflowPipeline
 from kalmanflow import rts as rts_module
 from kalmanflow.kalman import FilterStep
+from kalmanflow.observations import Observation
 from kalmanflow.pipeline import (
-    InitializationObservation,
     PipelineInitializationPhase,
     PipelineState,
 )
@@ -71,8 +71,8 @@ def _pipeline(smoother: object | None = None) -> OnlineInflowPipeline:
     )
 
 
-def _observation(minutes: int, *, storage: float = 100.0) -> InitializationObservation:
-    return InitializationObservation(
+def _observation(minutes: int, *, storage: float = 100.0) -> Observation:
+    return Observation(
         START + timedelta(minutes=minutes), storage=storage, discharge=4.0
     )
 
@@ -81,9 +81,9 @@ def _state(
     phase: PipelineInitializationPhase,
     *,
     last: datetime | None = START,
-    initial: InitializationObservation | None = None,
+    initial: Observation | None = None,
     anchor: object | None = None,
-    observations: tuple[InitializationObservation, ...] = (),
+    observations: tuple[Observation, ...] = (),
 ) -> PipelineState:
     return PipelineState(
         phase=phase,
@@ -107,7 +107,7 @@ def _valid_filter_step(timestamp: datetime = START) -> FilterStep:
 
 def test_initialization_observation_and_pipeline_properties() -> None:
     with pytest.raises(TypeError, match="timestamp must be a datetime"):
-        InitializationObservation("bad", 1.0, 2.0)
+        Observation("bad", 1.0, 2.0)
 
     pipeline = _pipeline()
     assert pipeline.max_window_steps == 4

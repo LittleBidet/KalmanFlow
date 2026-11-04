@@ -322,3 +322,26 @@ def test_validation_scalar_helpers_and_optional_plotly_error(monkeypatch) -> Non
     monkeypatch.setattr(builtins, "__import__", fail_plotly)
     with pytest.raises(ImportError, match="optional plotly"):
         validation._plotly_graph_objects()
+
+
+def test_shared_aware_timestamp_preserves_identity_and_rejects_bad_values():
+    from datetime import UTC, datetime
+
+    from kalmanflow.time_utils import aware_timestamp
+
+    timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+    assert aware_timestamp(timestamp) is timestamp
+    with pytest.raises(TypeError, match="timestamp must be a datetime instance"):
+        aware_timestamp(object())
+    with pytest.raises(ValueError, match="timestamp must be timezone-aware"):
+        aware_timestamp(datetime(2024, 1, 1))
+
+
+def test_pipeline_timestamp_validation_rejects_non_datetime():
+    from datetime import timedelta
+
+    from kalmanflow import OnlineFixedLagRTS, OnlineInflowPipeline
+
+    pipeline = OnlineInflowPipeline(object(), OnlineFixedLagRTS(timedelta(hours=1)))
+    with pytest.raises(TypeError, match="timestamp must be a datetime instance"):
+        pipeline.process(timestamp=object(), storage=1.0, discharge=1.0)

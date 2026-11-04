@@ -18,7 +18,6 @@ from kalmanflow import (
 )
 from kalmanflow.core import _build_default_backend
 from kalmanflow.kalman import FilterStep, _solve_right, kalman_filter
-from kalmanflow.pipeline import InitializationObservation
 from kalmanflow.rts import _rts_gains, _rts_smooth_arrays, _rts_smooth_means
 
 
@@ -328,7 +327,7 @@ def test_batch_stream_and_generic_revisions_agree_bitwise(irregular, si, uncerta
     steps = list(
         backend.initialize(
             *(
-                InitializationObservation(o.timestamp, o.storage, o.discharge)
+                Observation(o.timestamp, o.storage, o.discharge)
                 for o in observations[:2]
             )
         )
