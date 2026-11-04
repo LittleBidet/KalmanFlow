@@ -156,6 +156,17 @@ class OnlineInflowPipeline:
     ) -> None:
         """Create a pipeline with a model backend and a smoothing component."""
 
+        methods = ("add_step", "provisional", "active_steps", "clear")
+        attributes = ("max_window_steps", "pending_count", "last_finalized_steps")
+        missing = [
+            name for name in methods if not callable(getattr(smoother, name, None))
+        ]
+        missing.extend(name for name in attributes if not hasattr(smoother, name))
+        if missing:
+            raise TypeError(
+                "smoother does not implement PipelineSmoother: missing "
+                + ", ".join(missing)
+            )
         self.backend = backend
         self._smoother = smoother
         smoother_limit = bounded_integer(
@@ -178,7 +189,6 @@ class OnlineInflowPipeline:
         self._last_filter_step: FilterStep | None = None
         self._filter_anchor: FilterStep | None = None
         self._unfinished_observations: list[InitializationObservation] = []
-        self._fallback_active_steps: list[FilterStep] = []
 
     @property
     def initialized(self) -> bool:
@@ -263,7 +273,6 @@ class OnlineInflowPipeline:
         observations during :meth:`restore_state`.
         """
 
-        self._require_replayable_smoother()
         active_steps = self._active_steps()
         if len(active_steps) != len(self._unfinished_observations):
             raise RuntimeError(
@@ -357,16 +366,12 @@ class OnlineInflowPipeline:
     def _clear_state(self) -> None:
         """Reset state while preserving the backend and smoother settings."""
 
-        clear = getattr(self._smoother, "clear", None)
-        if not callable(clear):
-            raise RuntimeError("pipeline smoother does not support state restoration")
-        clear()
+        self._smoother.clear()
         self._initial_observation = None
         self._last_input_timestamp = None
         self._last_filter_step = None
         self._filter_anchor = None
         self._unfinished_observations.clear()
-        self._fallback_active_steps.clear()
 
     def _validate_state(
         self, state: PipelineState[FilterStep]
@@ -493,69 +498,23 @@ class OnlineInflowPipeline:
     ) -> tuple[SmoothedState, ...]:
         """Add one filter step and keep only raw data needed for replay."""
 
-        active_steps: tuple[FilterStep, ...] = ()
-        use_smoother_finalized_steps = self._has_finalized_steps_api()
-        if not use_smoother_finalized_steps:
-            active_steps = self._active_steps()
-            if len(active_steps) != len(self._unfinished_observations):
-                raise RuntimeError(
-                    "pipeline replay state is inconsistent with the smoother"
-                )
         finalized = self._smoother.add_step(step)
         finalized_count = len(finalized)
-        if use_smoother_finalized_steps:
-            finalized_steps = self._last_finalized_steps()
-            if len(finalized_steps) != finalized_count:
-                raise RuntimeError(
-                    "smoother finalized state is inconsistent with its outputs"
-                )
-        else:
-            all_steps = (*active_steps, step)
-            if finalized_count > len(all_steps):
-                raise RuntimeError("smoother finalized more steps than it received")
-            finalized_steps = all_steps[:finalized_count]
-
+        finalized_steps = tuple(self._smoother.last_finalized_steps)
+        if len(finalized_steps) != finalized_count:
+            raise RuntimeError(
+                "smoother finalized state is inconsistent with its outputs"
+            )
         self._unfinished_observations.append(observation)
-        if not self._has_active_steps_api():
-            self._fallback_active_steps.append(step)
         if finalized_count:
             self._filter_anchor = finalized_steps[-1]
             del self._unfinished_observations[:finalized_count]
-            if not self._has_active_steps_api():
-                del self._fallback_active_steps[:finalized_count]
         return finalized
 
     def _active_steps(self) -> tuple[FilterStep, ...]:
-        """Read active steps, with a compatibility fallback for basic smoothers."""
+        """Read active forward-filter steps in timestamp order."""
 
-        active_steps = getattr(self._smoother, "active_steps", None)
-        if callable(active_steps):
-            return tuple(active_steps())
-        return tuple(self._fallback_active_steps)
-
-    def _has_active_steps_api(self) -> bool:
-        """Whether the smoother can expose active steps itself."""
-
-        return callable(getattr(self._smoother, "active_steps", None))
-
-    def _has_finalized_steps_api(self) -> bool:
-        """Whether the smoother reports the forward steps it just finalized."""
-
-        return hasattr(self._smoother, "last_finalized_steps")
-
-    def _last_finalized_steps(self) -> tuple[FilterStep, ...]:
-        """Read the forward steps released by the latest smoother update."""
-
-        return tuple(self._smoother.last_finalized_steps)
-
-    def _require_replayable_smoother(self) -> None:
-        """Require the reset hook used by checkpoint restoration."""
-
-        if not callable(getattr(self._smoother, "clear", None)):
-            raise RuntimeError(
-                "pipeline smoother does not support checkpoint state "
-                "export and restoration"
-            )
+        return tuple(self._smoother.active_steps())
 
     def _validate_timestamp(self, timestamp: datetime) -> None:
         """Check that a new timestamp is aware and later than the previous one."""

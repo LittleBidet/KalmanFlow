@@ -41,6 +41,7 @@ class FakeFixedLagSmoother:
     def __init__(self, lag: timedelta):
         self.lag = lag
         self.steps: list[FakeFilterStep] = []
+        self._last_finalized_steps = ()
 
     @property
     def max_window_steps(self):
@@ -66,8 +67,20 @@ class FakeFixedLagSmoother:
             )
             for active_step in self.steps[:eligible_count]
         )
+        self._last_finalized_steps = tuple(self.steps[:eligible_count])
         del self.steps[:eligible_count]
         return finalized
+
+    @property
+    def last_finalized_steps(self):
+        return self._last_finalized_steps
+
+    def active_steps(self):
+        return tuple(self.steps)
+
+    def clear(self):
+        self.steps.clear()
+        self._last_finalized_steps = ()
 
     def provisional(self):
         return tuple(

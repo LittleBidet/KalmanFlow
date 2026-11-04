@@ -64,33 +64,6 @@ class _ModernSmoother:
         self.last_finalized_steps = ()
 
 
-class _LegacySmoother:
-    """Smoother implementing the original active-step compatibility API."""
-
-    max_window_steps = 4
-
-    def __init__(self, releases: tuple[object, ...] = ()) -> None:
-        self._active: list[_Step] = []
-        self._releases = releases
-
-    @property
-    def pending_count(self) -> int:
-        return len(self._active)
-
-    def add_step(self, step: _Step) -> tuple[object, ...]:
-        self._active.append(step)
-        releases = self._releases
-        if releases:
-            self._active = self._active[len(releases) :]
-        return releases
-
-    def provisional(self) -> tuple[object, ...]:
-        return tuple(self._active)
-
-    def clear(self) -> None:
-        self._active.clear()
-
-
 def _pipeline(smoother: object | None = None) -> OnlineInflowPipeline:
     return OnlineInflowPipeline(
         _Backend(),
@@ -287,42 +260,7 @@ def test_pipeline_restore_and_snapshot_validation_errors(
         pipeline.restore_state(replay_state)
 
 
-def test_pipeline_requires_smoother_clear_and_releases_legacy_state() -> None:
-    pipeline = _pipeline()
-    pipeline._smoother.clear = None
-    with pytest.raises(RuntimeError, match="does not support checkpoint state"):
-        pipeline.export_state()
-    with pytest.raises(RuntimeError, match="does not support state restoration"):
-        pipeline._clear_state()
-
-    legacy = _LegacySmoother()
-    pipeline = _pipeline(legacy)
-    first, second = _observation(0), _observation(15)
-    pipeline._add_step(_Step(first.timestamp), observation=first)
-    pipeline._add_step(_Step(second.timestamp), observation=second)
-    assert len(pipeline._fallback_active_steps) == 2
-    assert len(pipeline._unfinished_observations) == 2
-
-    released = _LegacySmoother((object(),))
-    pipeline = _pipeline(released)
-    pipeline._add_step(_Step(START), observation=first)
-    assert pipeline._fallback_active_steps == []
-
-
-def test_pipeline_add_step_detects_legacy_and_modern_inconsistencies() -> None:
-    legacy = _LegacySmoother()
-    pipeline = _pipeline(legacy)
-    pipeline._fallback_active_steps.append(_Step(START))
-    with pytest.raises(RuntimeError, match="inconsistent with the smoother"):
-        pipeline._add_step(
-            _Step(START + timedelta(minutes=15)), observation=_observation(15)
-        )
-
-    legacy = _LegacySmoother((object(), object()))
-    pipeline = _pipeline(legacy)
-    with pytest.raises(RuntimeError, match="more steps than it received"):
-        pipeline._add_step(_Step(START), observation=_observation(0))
-
+def test_pipeline_add_step_detects_inconsistent_finalized_outputs() -> None:
     modern = _ModernSmoother(releases=(object(),))
     modern.last_finalized_steps = ()
     modern.add_step = lambda step: (object(),)
@@ -388,3 +326,39 @@ def test_rts_array_shape_validation_and_lag_property() -> None:
 
     smoother = OnlineFixedLagRTS(timedelta(minutes=5), max_window_steps=3)
     assert smoother.lag == timedelta(minutes=5)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "add_step",
+        "provisional",
+        "active_steps",
+        "clear",
+        "max_window_steps",
+        "pending_count",
+        "last_finalized_steps",
+    ],
+)
+def test_pipeline_requires_every_smoother_member(member):
+    class Incomplete:
+        def __getattr__(self, name):
+            if name == member:
+                raise AttributeError(name)
+            return getattr(self.delegate, name)
+
+    smoother = Incomplete()
+    smoother.delegate = _ModernSmoother()
+    with pytest.raises(
+        TypeError, match="smoother does not implement PipelineSmoother"
+    ) as error:
+        _pipeline(smoother)
+    assert member in str(error.value)
+
+
+@pytest.mark.parametrize("member", ["add_step", "provisional", "active_steps", "clear"])
+def test_pipeline_requires_callable_smoother_methods(member):
+    smoother = _ModernSmoother()
+    setattr(smoother, member, None)
+    with pytest.raises(TypeError, match=member):
+        _pipeline(smoother)
