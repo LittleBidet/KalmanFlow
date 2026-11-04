@@ -41,8 +41,6 @@ from .pipeline import (
 )
 from .reservoir_backend import ReservoirBackend
 from .reservoir_config import (
-    InflowUnits,
-    InitializationStrategy,
     ReservoirConfig,
 )
 from .rts import OnlineFixedLagRTS, SmoothedStep, smooth_filter_steps
@@ -56,8 +54,6 @@ except PackageNotFoundError:
 __all__ = [
     "CFS_TO_ACRE_FEET_PER_SECOND",
     "FilterStep",
-    "InflowUnits",
-    "InitializationStrategy",
     "KalmanFilterResult",
     "Observation",
     "OnlineFixedLagRTS",

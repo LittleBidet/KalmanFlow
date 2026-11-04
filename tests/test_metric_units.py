@@ -7,8 +7,6 @@ import pandas as pd
 import pytest
 
 from kalmanflow import (
-    InflowUnits,
-    InitializationStrategy,
     Observation,
     OnlineReservoirInflow,
     ReservoirConfig,
@@ -26,7 +24,6 @@ def config(units=None):
         r=np.array([[4.0, 0.2], [0.2, 2.0]]),
         p0=np.array([[100.0, 2.0, 3.0], [2.0, 1000.0, 4.0], [3.0, 4.0, 1000.0]]),
         smoothing_lag=timedelta(minutes=15),
-        initialization_strategy=InitializationStrategy.FIRST_TWO_VALID_STORAGE,
         model_version="v1",
         configuration_version="v1",
         unit_system=units or UnitSystem.us_customary(),
@@ -68,7 +65,6 @@ def test_conversion_preserves_physical_estimates_and_uncertainty():
     for name in ("q", "r", "p0"):
         np.testing.assert_allclose(getattr(restored, name), getattr(original, name))
     assert original.unit_system == UnitSystem.us_customary()
-    assert metric.inflow_units == InflowUnits.SYSTEM_FLOW_RATE
 
 
 def test_simple_metric_batch_and_stream_match_config():
@@ -113,4 +109,3 @@ def test_unit_conversion_validation():
         us.conversion_factors_to("si")
     with pytest.raises(ValueError, match="built-in"):
         us.conversion_factors_to(UnitSystem("litres", "litres/s", 1.0))
-    assert config(si).inflow_units == InflowUnits.SYSTEM_FLOW_RATE

@@ -34,7 +34,6 @@ from .rts import (
 from .time_utils import aware_timestamp, to_utc, validate_timestamp_precision
 from .units import UnitSystem
 
-_UNSET: Final = object()
 _DEFAULT_UNITS: Final = UnitSystem.us_customary()
 
 
@@ -316,29 +315,14 @@ class OnlineReservoirInflow:
 
         return self._reservoir_id
 
-    def process(
-        self,
-        observation: ObservationLike | None = None,
-        *,
-        timestamp: datetime | object = _UNSET,
-        storage: float | object = _UNSET,
-        discharge: float | object = _UNSET,
-    ) -> ReservoirFlowUpdate:
+    def process(self, observation: ObservationLike) -> ReservoirFlowUpdate:
         """Process one observation and return currently available flow outputs.
 
-        An observation object may be supplied positionally, or the legacy
-        keyword ``timestamp``, ``storage``, and ``discharge`` arguments may be
-        used. Checkpoints become available only after this update is fully
-        constructed.
+        Checkpoints become available only after this update is fully constructed.
         """
 
         try:
-            values = _process_values_from_arguments(
-                observation,
-                timestamp=timestamp,
-                storage=storage,
-                discharge=discharge,
-            )
+            values = _process_values_from_observation(observation)
         except Exception:
             self._mark_preprocessing_failure()
             raise
@@ -510,26 +494,6 @@ class OnlineReservoirInflow:
                 for state in update.smoothed_states
             ),
         )
-
-
-def _process_values_from_arguments(
-    observation: ObservationLike | None,
-    *,
-    timestamp: datetime | object,
-    storage: float | object,
-    discharge: float | object,
-) -> tuple[datetime, float, float]:
-    """Normalize the object and legacy-keyword forms of ``process``."""
-
-    if observation is not None:
-        if any(value is not _UNSET for value in (timestamp, storage, discharge)):
-            raise TypeError(
-                "pass either an observation object or timestamp, storage, and discharge"
-            )
-        return _process_values_from_observation(observation)
-    if any(value is _UNSET for value in (timestamp, storage, discharge)):
-        raise TypeError("process requires timestamp, storage, and discharge")
-    return _validated_process_values(timestamp, storage, discharge)
 
 
 def _process_values_from_observation(

@@ -9,7 +9,7 @@
 3. Initialization creates two forward filter steps. The first uses outflow as a steady-state inflow prior and does not inspect the second observation; the second is a normal causal update. Each later input creates one forward step, using the actual elapsed seconds since its predecessor.
 4. Each step enters the fixed-lag RTS smoother. A state is released only after the configured elapsed-time lag has passed.
 
-`PipelineUpdate.filtered_state` is the latest forward step; `filtered_states` contains every step created by that call; and `smoothed_states` contains just the newly finalized states. `provisional_states` may inspect the active lag window without releasing it.
+`PipelineUpdate.filtered_states` contains every step created by that call; and `smoothed_states` contains just the newly finalized states. `provisional_states` may inspect the active lag window without releasing it.
 
 ## Reservoir API
 

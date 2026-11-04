@@ -180,8 +180,8 @@ def test_runner_preserves_current_tuner_inputs_and_exports_two_artifacts(
     assert exported_config["r"] == config.r.tolist()
     assert exported_config["p0"] == config.p0.tolist()
     assert exported_config["smoothing_lag_seconds"] == 21600.0
-    assert exported_config["initialization_strategy"] == "first_two_valid_storage"
-    assert exported_config["inflow_units"] == "cfs"
+    assert "initialization_strategy" not in exported_config
+    assert "inflow_units" not in exported_config
     assert exported_config["unit_system"]["flow_to_volume_per_second"] > 0.0
     assert "candidate_summary" not in exported_config
 

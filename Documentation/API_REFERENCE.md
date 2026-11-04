@@ -13,7 +13,7 @@ compatibility promise.
 | Export | Purpose |
 | --- | --- |
 | `Observation(timestamp, storage, discharge)` | Immutable streaming input. Timestamp must be timezone-aware and no finer than microsecond precision; use `NaN` for a missing value after initialization. |
-| `OnlineReservoirInflow` | Streaming estimator; defaults to acre-ft/cfs. Pass `unit_system=UnitSystem.si()` for m³ and m³/s. Construct with the five scalar diagonal noise values; use `process`, `process_many`, `initialized`, and `pending_count`. Set keyword-only `include_uncertainty=True` to publish inflow standard deviations. |
+| `OnlineReservoirInflow` | Streaming estimator; defaults to acre-ft/cfs. Pass `unit_system=UnitSystem.si()` for m³ and m³/s. Construct with the five scalar diagonal noise values; use `process(observation)`, `process_many`, `initialized`, and `pending_count`. Set keyword-only `include_uncertainty=True` to publish inflow standard deviations. |
 | `OnlineReservoirInflow.from_config(config, include_uncertainty=False)` | Creates a stream from reviewed configuration, including its units and smoothing lag. Set `include_uncertainty=True` to publish inflow standard deviations. |
 | `OnlineReservoirInflow.from_checkpoint(checkpoint, config=..., include_uncertainty=False)` | Restores a configured stream. The reservoir ID and fingerprinted model, covariance, lag, and unit settings must match. Choose the uncertainty output option again when restoring. |
 | `OnlineReservoirInflow.checkpoint()` | Produces resumable state after a successful call. It requires a reservoir ID; streams made with `from_config` have one. |
@@ -83,17 +83,14 @@ also appear as model mismatch.
 | --- | --- |
 | `ReservoirConfig` | Immutable reservoir identity, covariance, lag, units, version, and metadata. `q`, `r`, and `p0` are 3×3, 2×2, and 3×3 covariance matrices respectively. |
 | `ReservoirConfig.to_units(target)` | Returns a copy with all entries of `q`, `r`, and `p0` converted, including cross-covariances; preserves metadata and versions. Convert observations separately. |
-| `InitializationStrategy` | Initialization policy enum. The currently supported value is `FIRST_TWO_VALID_STORAGE`. |
-| `InflowUnits` | Optional legacy consistency check; new code can omit `inflow_units`. The default `SYSTEM_FLOW_RATE` accepts the configured flow unit; `CUBIC_FEET_PER_SECOND` requires a `cfs` flow label. |
 | `UnitSystem` | Volume/flow labels and rate-to-volume-per-second conversion. Use `us_customary()`, `si()`, `flow_to_volume()`, and `volume_to_flow_rate()` as needed. |
 | `UnitSystem.conversion_factors_to(target)` | Returns storage and flow multipliers for converting data. Supports built-in US/SI systems or identical custom systems; other conversions raise `ValueError`. |
 | `CFS_TO_ACRE_FEET_PER_SECOND` | Conversion constant used by the default acre-ft/cfs model. |
 
 Unit selection controls model calculations, not automatic data conversion.
 Storage, discharge, and covariances must already use the selected units;
-inflow and its standard deviation use the configured flow unit. Existing
-positional configurations remain supported; use keywords when omitting
-`inflow_units`.
+inflow and its standard deviation use the configured flow unit. Both
+`model_version` and `configuration_version` are required, nonempty strings.
 
 `q` is continuous-time diffusion covariance, not a discrete fixed-interval Q
 matrix. All covariance inputs must be finite, symmetric, and positive

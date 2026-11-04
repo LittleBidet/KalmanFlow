@@ -16,8 +16,6 @@ import pandas as pd
 import pytest
 
 from kalmanflow import (
-    InflowUnits,
-    InitializationStrategy,
     Observation,
     OnlineReservoirInflow,
     ReservoirConfig,
@@ -35,8 +33,6 @@ def _config(**overrides: object) -> ReservoirConfig:
         "r": np.diag([0.25, 0.5]),
         "p0": np.diag([4.0, 9.0, 16.0]),
         "smoothing_lag": timedelta(minutes=30),
-        "initialization_strategy": InitializationStrategy.FIRST_TWO_VALID_STORAGE,
-        "inflow_units": InflowUnits.CUBIC_FEET_PER_SECOND,
         "model_version": "model-v1",
         "configuration_version": "config-v1",
         "unit_system": UnitSystem.us_customary(),
@@ -131,8 +127,6 @@ from pathlib import Path
 import numpy as np
 
 from kalmanflow import (
-    InflowUnits,
-    InitializationStrategy,
     Observation,
     OnlineReservoirInflow,
     ReservoirConfig,
@@ -146,8 +140,6 @@ config = ReservoirConfig(
     r=np.diag([0.25, 0.5]),
     p0=np.diag([4.0, 9.0, 16.0]),
     smoothing_lag=timedelta(minutes=30),
-    initialization_strategy=InitializationStrategy.FIRST_TWO_VALID_STORAGE,
-    inflow_units=InflowUnits.CUBIC_FEET_PER_SECOND,
     model_version="model-v1",
     configuration_version="config-v1",
     unit_system=UnitSystem.us_customary(),
@@ -568,9 +560,11 @@ def test_checkpoint_preserves_microsecond_timestamp_and_rejects_finer_input() ->
     stream = OnlineReservoirInflow.from_config(config)
     microsecond_timestamp = pd.Timestamp("2024-01-01T00:00:00.000001Z")
     stream.process(
-        timestamp=microsecond_timestamp,
-        storage=100.0,
-        discharge=4.0,
+        Observation(
+            timestamp=microsecond_timestamp,
+            storage=100.0,
+            discharge=4.0,
+        ),
     )
     restored = OnlineReservoirInflow.from_checkpoint(
         stream.checkpoint(), config=config
@@ -583,9 +577,11 @@ def test_checkpoint_preserves_microsecond_timestamp_and_rejects_finer_input() ->
     submicrosecond_timestamp = pd.Timestamp("2024-01-01T00:15:00.000001123Z")
     with pytest.raises(ValueError, match="finer than microsecond"):
         stream.process(
-            timestamp=submicrosecond_timestamp,
-            storage=101.0,
-            discharge=4.1,
+            SimpleNamespace(
+                timestamp=submicrosecond_timestamp,
+                storage=101.0,
+                discharge=4.1,
+            ),
         )
     assert stream._pipeline.last_input_timestamp == microsecond_timestamp
 

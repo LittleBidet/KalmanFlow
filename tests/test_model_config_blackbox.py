@@ -10,8 +10,6 @@ import numpy.testing as npt
 import pytest
 
 from kalmanflow import (
-    InflowUnits,
-    InitializationStrategy,
     Observation,
     ReservoirConfig,
     ReservoirStateSpaceModel,
@@ -31,8 +29,6 @@ def _config(**overrides: object) -> ReservoirConfig:
         "r": R,
         "p0": P0,
         "smoothing_lag": timedelta(minutes=30),
-        "initialization_strategy": InitializationStrategy.FIRST_TWO_VALID_STORAGE,
-        "inflow_units": InflowUnits.CUBIC_FEET_PER_SECOND,
         "model_version": "model-v1",
         "configuration_version": "config-v1",
         "metadata": {"source": "test"},
@@ -172,21 +168,6 @@ class TestReservoirConfigPartitions:
         with pytest.raises(ValueError, match=message):
             _config(**overrides)
 
-    def test_enum_values_are_coerced(self) -> None:
-        config = _config(
-            initialization_strategy="first_two_valid_storage",
-            inflow_units="cfs",
-        )
-        assert (
-            config.initialization_strategy
-            is InitializationStrategy.FIRST_TWO_VALID_STORAGE
-        )
-        assert config.inflow_units is InflowUnits.CUBIC_FEET_PER_SECOND
-
-    def test_invalid_enum_value_rejected(self) -> None:
-        with pytest.raises(ValueError):
-            _config(inflow_units="quadratic")
-
     @pytest.mark.parametrize(
         "field",
         [
@@ -212,16 +193,26 @@ class TestReservoirConfigPartitions:
         with pytest.raises(TypeError, match="unit_system must be a UnitSystem"):
             _config(unit_system="not-a-unit-system")
 
-    def test_cfs_inflow_units_require_cfs_unit_system(self) -> None:
-        with pytest.raises(ValueError, match="cfs inflow_units"):
-            _config(unit_system=UnitSystem.si())
-
-    def test_system_flow_rate_units_support_si_unit_system(self) -> None:
-        config = _config(
-            unit_system=UnitSystem.si(),
-            inflow_units=InflowUnits.SYSTEM_FLOW_RATE,
+    @pytest.mark.parametrize("field", ["model_version", "configuration_version"])
+    def test_versions_are_required(self, field: str) -> None:
+        values = dict(
+            reservoir_id="test",
+            reservoir_name="Test",
+            q=Q,
+            r=R,
+            p0=np.eye(3),
+            smoothing_lag=timedelta(hours=1),
+            model_version="model-v1",
+            configuration_version="config-v1",
         )
-        assert config.inflow_units is InflowUnits.SYSTEM_FLOW_RATE
+        del values[field]
+        with pytest.raises(TypeError, match=field):
+            ReservoirConfig(**values)
+
+    @pytest.mark.parametrize("field", ["model_version", "configuration_version"])
+    def test_versions_must_not_be_empty(self, field: str) -> None:
+        with pytest.raises(ValueError, match=f"{field} must not be empty"):
+            _config(**{field: ""})
 
     def test_metadata_is_frozen(self) -> None:
         source_array = np.array([1.0])

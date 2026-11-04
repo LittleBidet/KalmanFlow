@@ -10,7 +10,6 @@ from datetime import timedelta
 import numpy as np
 
 from kalmanflow import (
-    InitializationStrategy,
     ReservoirConfig,
     UnitSystem,
 )
@@ -22,7 +21,6 @@ config = ReservoirConfig(
     r=np.diag([100.0, 25.0]),
     p0=np.diag([1_000.0, 100.0, 100.0]),
     smoothing_lag=timedelta(hours=12),
-    initialization_strategy=InitializationStrategy.FIRST_TWO_VALID_STORAGE,
     model_version="physical-rate-v1",
     configuration_version="2026-01",
     metadata={"source": "initial calibration"},

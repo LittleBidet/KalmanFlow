@@ -10,8 +10,7 @@ import pandas as pd
 import pytest
 
 from kalmanflow import (
-    InflowUnits,
-    InitializationStrategy,
+    Observation,
     OnlineReservoirInflow,
     OutputFlag,
     ReservoirConfig,
@@ -32,8 +31,6 @@ def _config() -> ReservoirConfig:
         r=np.diag([0.25, 0.5]),
         p0=np.diag([100.0, 1000.0, 1000.0]),
         smoothing_lag=timedelta(hours=1),
-        initialization_strategy=InitializationStrategy.FIRST_TWO_VALID_STORAGE,
-        inflow_units=InflowUnits.CUBIC_FEET_PER_SECOND,
         model_version="coverage-model",
         configuration_version="coverage-config",
     )
@@ -108,7 +105,7 @@ def test_reservoir_flow_estimate_rejects_invalid_fields(
         core.ReservoirFlowEstimate(**values)
 
 
-def test_online_stream_argument_forms_and_preprocessing_errors() -> None:
+def test_online_stream_observation_preprocessing_errors() -> None:
     stream = OnlineReservoirInflow(
         q_storage=0.1,
         q_inflow=0.1,
@@ -116,22 +113,15 @@ def test_online_stream_argument_forms_and_preprocessing_errors() -> None:
         r_storage=0.25,
         r_outflow=0.5,
     )
-    with pytest.raises(TypeError, match="either an observation object"):
-        stream.process(
-            SimpleNamespace(timestamp=TIMESTAMP, storage=100.0, discharge=4.0),
-            timestamp=TIMESTAMP,
-        )
-    with pytest.raises(TypeError, match="requires timestamp"):
-        stream.process()
     with pytest.raises(TypeError, match="must provide timestamp"):
         stream.process(SimpleNamespace(timestamp=TIMESTAMP, storage=100.0))
     with pytest.raises(TypeError, match="timestamp must be a datetime"):
-        stream.process(timestamp="bad", storage=100.0, discharge=4.0)
+        stream.process(SimpleNamespace(timestamp="bad", storage=100.0, discharge=4.0))
 
     assert stream.process_many(()) == ()
-    stream.process(timestamp=TIMESTAMP, storage=100.0, discharge=4.0)
+    stream.process(Observation(timestamp=TIMESTAMP, storage=100.0, discharge=4.0))
     with pytest.raises(ValueError, match="strictly increasing"):
-        stream.process(timestamp=TIMESTAMP, storage=101.0, discharge=4.0)
+        stream.process(Observation(timestamp=TIMESTAMP, storage=101.0, discharge=4.0))
     with pytest.raises(RuntimeError, match="successful process result"):
         stream.checkpoint()
 
@@ -146,7 +136,7 @@ def test_online_stream_checkpoint_and_reentrancy_guards(
         r_storage=0.25,
         r_outflow=0.5,
     )
-    stream.process(timestamp=TIMESTAMP, storage=100.0, discharge=4.0)
+    stream.process(Observation(timestamp=TIMESTAMP, storage=100.0, discharge=4.0))
     with pytest.raises(RuntimeError, match="reservoir_id"):
         stream.checkpoint()
 

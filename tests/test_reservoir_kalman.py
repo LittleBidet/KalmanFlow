@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import numpy as np
 import numpy.testing as npt
@@ -7,8 +8,6 @@ import pytest
 
 from kalmanflow import (
     FilterStep,
-    InflowUnits,
-    InitializationStrategy,
     Observation,
     OnlineFixedLagRTS,
     OnlineReservoirInflow,
@@ -36,8 +35,6 @@ def _config(**overrides: object) -> ReservoirConfig:
         "r": R,
         "p0": P0,
         "smoothing_lag": timedelta(minutes=30),
-        "initialization_strategy": InitializationStrategy.FIRST_TWO_VALID_STORAGE,
-        "inflow_units": InflowUnits.CUBIC_FEET_PER_SECOND,
         "model_version": "model-v1",
         "configuration_version": "config-v1",
         "metadata": {"source": "test"},
@@ -370,10 +367,14 @@ def test_stream_rejects_infinity_before_mutating_state() -> None:
     )
 
     with pytest.raises(ValueError, match="storage must be finite or NaN"):
-        stream.process(timestamp=start, storage=np.inf, discharge=4.0)
+        stream.process(SimpleNamespace(timestamp=start, storage=np.inf, discharge=4.0))
     assert stream.initialized is False
     assert stream.process(
-        timestamp=start, storage=100.0, discharge=4.0
+        Observation(
+            timestamp=start,
+            storage=100.0,
+            discharge=4.0,
+        ),
     ).filtered_inflows == ()
 
 

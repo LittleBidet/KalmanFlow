@@ -32,7 +32,7 @@ def test_filtering_and_evaluation_do_not_import_optimizer_dependencies() -> None
         import numpy as np
         import pandas as pd
         from kalmanflow import (
-            BayesianEvaluationSettings, InflowUnits, InitializationStrategy,
+            BayesianEvaluationSettings,
             ReservoirConfig, evaluate_configuration, get_reservoir_inflow,
             tune_inflow_noise_bayesian,
         )
@@ -44,8 +44,7 @@ def test_filtering_and_evaluation_do_not_import_optimizer_dependencies() -> None
         assert result.estimated_inflow.notna().all()
         config = ReservoirConfig(
             'demo', 'Demo', np.eye(3), np.eye(2), np.eye(3), timedelta(hours=1),
-            InitializationStrategy.FIRST_TWO_VALID_STORAGE,
-            InflowUnits.CUBIC_FEET_PER_SECOND, 'v1', 'c1',
+            'v1', 'c1',
         )
         evaluation = evaluate_configuration(
             storage, discharge, config,

@@ -162,8 +162,6 @@ def _proposed_config(
         r=r,
         p0=np.asarray(base.p0).copy(),
         smoothing_lag=base.smoothing_lag,
-        initialization_strategy=base.initialization_strategy,
-        inflow_units=base.inflow_units,
         model_version=base.model_version,
         configuration_version=proposed_configuration_version,
         metadata=metadata,

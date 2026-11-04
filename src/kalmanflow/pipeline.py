@@ -110,14 +110,12 @@ class PipelineUpdate[FilterStep, SmoothedState]:
     """Outputs produced by one pipeline call.
 
     ``filtered_states`` contains every new forward-filter state created by the
-    call. ``filtered_state`` remains the latest one for compatibility with the
-    original streaming API. Smoothed states are only included once the fixed
+    call. Smoothed states are only included once the fixed
     lag has finalized them.
     """
 
-    filtered_state: FilterStep | None
+    filtered_states: tuple[FilterStep, ...]
     smoothed_states: tuple[SmoothedState, ...]
-    filtered_states: tuple[FilterStep, ...] = ()
 
 
 class OnlineInflowPipeline:
@@ -235,7 +233,6 @@ class OnlineInflowPipeline:
         self._last_filter_step = step
         self._last_input_timestamp = timestamp
         return PipelineUpdate(
-            filtered_state=step,
             smoothed_states=finalized,
             filtered_states=(step,),
         )
@@ -428,7 +425,6 @@ class OnlineInflowPipeline:
 
         if not isfinite(storage):
             return PipelineUpdate(
-                filtered_state=None,
                 smoothed_states=(),
                 filtered_states=(),
             )
@@ -444,7 +440,6 @@ class OnlineInflowPipeline:
                 discharge=discharge,
             )
             return PipelineUpdate(
-                filtered_state=None,
                 smoothed_states=(),
                 filtered_states=(),
             )
@@ -465,7 +460,6 @@ class OnlineInflowPipeline:
         self._last_filter_step = steps[1]
         self._initial_observation = None
         return PipelineUpdate(
-            filtered_state=steps[1],
             smoothed_states=tuple(finalized),
             filtered_states=steps,
         )

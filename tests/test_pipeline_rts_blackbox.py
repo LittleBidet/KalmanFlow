@@ -120,7 +120,7 @@ class TestPipelineStateTransitions:
         )
 
         assert pipeline.initialized is False
-        assert update.filtered_state is None
+        assert update.filtered_states == ()
         assert update.smoothed_states == ()
 
     def test_first_valid_storage_waits_for_second_sample(self) -> None:
@@ -130,7 +130,7 @@ class TestPipelineStateTransitions:
         first = pipeline.process(timestamp=start, storage=100.0, discharge=4.0)
 
         assert pipeline.initialized is False
-        assert first.filtered_state is None
+        assert first.filtered_states == ()
         assert first.smoothed_states == ()
 
     def test_first_valid_storage_requires_finite_discharge(self) -> None:
@@ -152,8 +152,8 @@ class TestPipelineStateTransitions:
         )
 
         assert pipeline.initialized is True
-        assert second.filtered_state is not None
-        assert second.filtered_state.timestamp == start + timedelta(minutes=15)
+        assert second.filtered_states
+        assert second.filtered_states[-1].timestamp == start + timedelta(minutes=15)
 
     def test_missing_discharge_on_second_initialization_is_allowed(self) -> None:
         start = datetime(2024, 1, 1, tzinfo=UTC)
@@ -167,7 +167,7 @@ class TestPipelineStateTransitions:
         )
 
         assert pipeline.initialized is True
-        assert second.filtered_state is not None
+        assert second.filtered_states
 
     def test_post_initialization_missing_storage_is_predict_only(self) -> None:
         start = datetime(2024, 1, 1, tzinfo=UTC)
@@ -188,9 +188,9 @@ class TestPipelineStateTransitions:
             discharge=5.0,
         )
 
-        assert update.filtered_state is not None
-        assert update.filtered_state.timestamp == start + timedelta(minutes=30)
-        assert np.isfinite(update.filtered_state.filtered_mean[0])
+        assert update.filtered_states
+        assert update.filtered_states[-1].timestamp == start + timedelta(minutes=30)
+        assert np.isfinite(update.filtered_states[-1].filtered_mean[0])
 
     def test_missing_discharge_is_a_partial_observation(self) -> None:
         start = datetime(2024, 1, 1, tzinfo=UTC)
@@ -208,9 +208,9 @@ class TestPipelineStateTransitions:
             discharge=float("nan"),
         )
 
-        assert update.filtered_state is not None
-        assert update.filtered_state.timestamp == start + timedelta(minutes=30)
-        assert np.isfinite(update.filtered_state.filtered_mean).all()
+        assert update.filtered_states
+        assert update.filtered_states[-1].timestamp == start + timedelta(minutes=30)
+        assert np.isfinite(update.filtered_states[-1].filtered_mean).all()
 
 class TestPipelineTimestampBoundaries:
     """BVA: timestamp ordering and timezone boundaries."""

@@ -7,8 +7,6 @@ import pandas as pd
 import pytest
 
 from kalmanflow import (
-    InflowUnits,
-    InitializationStrategy,
     Observation,
     OnlineReservoirInflow,
     ReservoirConfig,
@@ -42,8 +40,6 @@ def _config() -> ReservoirConfig:
             ]
         ),
         smoothing_lag=timedelta(minutes=20),
-        initialization_strategy=InitializationStrategy.FIRST_TWO_VALID_STORAGE,
-        inflow_units=InflowUnits.CUBIC_FEET_PER_SECOND,
         model_version="model-v1",
         configuration_version="config-v1",
         unit_system=UnitSystem.us_customary(),

@@ -10,8 +10,6 @@ import pytest
 from kalmanflow import (
     BayesianEvaluationSettings,
     BayesianTuningSettings,
-    InflowUnits,
-    InitializationStrategy,
     ReservoirConfig,
     UnitSystem,
     ValidationWindow,
@@ -34,8 +32,6 @@ def _config() -> ReservoirConfig:
         r=np.diag([0.25, 4.0]),
         p0=np.diag([10.0, 20.0, 30.0]),
         smoothing_lag=timedelta(hours=1),
-        initialization_strategy=InitializationStrategy.FIRST_TWO_VALID_STORAGE,
-        inflow_units=InflowUnits.CUBIC_FEET_PER_SECOND,
         model_version="model-v1",
         configuration_version="config-v1",
         unit_system=UnitSystem.us_customary(),

@@ -7,8 +7,6 @@ import kalmanflow
 EXPECTED_EXPORTS = {
     "CFS_TO_ACRE_FEET_PER_SECOND",
     "FilterStep",
-    "InflowUnits",
-    "InitializationStrategy",
     "KalmanFilterResult",
     "Observation",
     "OnlineFixedLagRTS",
