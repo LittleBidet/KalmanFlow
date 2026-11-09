@@ -262,7 +262,10 @@ def test_validation_private_storage_and_window_helpers() -> None:
         validation._inflow_values([[1.0, 2.0]])
 
     aware = pd.Series(
-        [1, 2], index=pd.date_range("2025-01-01", periods=2, freq="h", tz="US/Pacific")
+        [1, 2],
+        index=pd.date_range(
+            "2025-01-01", periods=2, freq="h", tz="America/Los_Angeles"
+        ),
     )
     assert str(validation._numeric_series(aware, "x").index.tz) == "UTC"
 
