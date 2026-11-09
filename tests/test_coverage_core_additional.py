@@ -140,10 +140,9 @@ def test_online_stream_checkpoint_and_reentrancy_guards(
     with pytest.raises(RuntimeError, match="reservoir_id"):
         stream.checkpoint()
 
-    stream._processing = True
-    stream._checkpoint_ready = True
-    stream._mark_preprocessing_failure()
-    assert stream._checkpoint_ready is True
+    stream._status = core._StreamStatus.PROCESSING
+    stream._mark_rejected()
+    assert stream._status is core._StreamStatus.PROCESSING
     with pytest.raises(RuntimeError, match="may not be re-entered"):
         stream.process_many(
             (
@@ -154,10 +153,10 @@ def test_online_stream_checkpoint_and_reentrancy_guards(
                 ),
             )
         )
-    stream._processing = True
+    assert stream._status is core._StreamStatus.PROCESSING
     with pytest.raises(RuntimeError, match="may not be re-entered"):
         stream._process_one_value((TIMESTAMP + timedelta(minutes=15), 101.0, 4.0))
-    stream._processing = False
+    stream._status = core._StreamStatus.AWAITING_SUCCESS
 
     with pytest.raises(TypeError, match="timestamp must be a datetime"):
         stream._validate_complete_order((("bad", 1.0, 2.0),))
@@ -169,6 +168,7 @@ def test_online_stream_checkpoint_and_reentrancy_guards(
     )
     with pytest.raises(ValueError, match="snapshot failed"):
         stream._process_many_values(((TIMESTAMP + timedelta(minutes=15), 101.0, 4.0),))
+    assert not stream.failed
 
     monkeypatch.setattr(stream._pipeline, "export_state", lambda: object())
     monkeypatch.setattr(
@@ -183,6 +183,7 @@ def test_online_stream_checkpoint_and_reentrancy_guards(
     )
     with pytest.raises(RuntimeError, match="could not be restored"):
         stream._process_many_values(((TIMESTAMP + timedelta(minutes=15), 101.0, 4.0),))
+    assert stream.failed
 
 
 def test_batch_validation_and_empty_initialization_paths() -> None:

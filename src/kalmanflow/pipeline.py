@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import IntEnum
 from math import isfinite
-from typing import Protocol, TypeVar
+from typing import Protocol, TypeVar, cast
 
 from ._validation import bounded_integer, measurement_value
 from .observations import Observation
@@ -15,7 +16,48 @@ from .time_utils import aware_timestamp, to_utc
 FilterStep = TypeVar("FilterStep")
 SmoothedState = TypeVar("SmoothedState")
 
+_FAILED_PIPELINE_MESSAGE = (
+    "pipeline failed after its smoothing window changed; "
+    "restore_state must replace it before further use"
+)
 
+
+@dataclass(frozen=True, slots=True)
+class _WaitingForFirst:
+    """No usable first observation has been accepted yet."""
+
+    last_input_timestamp: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class _WaitingForSecond:
+    """The first observation is held until a second finite storage arrives."""
+
+    first: Observation
+    last_input_timestamp: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _Running[FilterStep]:
+    """Initialized: every observation advances the forward filter.
+
+    ``anchor`` is the most recently finalized filter step, or ``None`` until
+    the smoother has released one.
+    """
+
+    last_step: FilterStep
+    anchor: FilterStep | None
+    last_input_timestamp: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _Failed:
+    """A call failed after the smoother accepted a step; state is unreliable."""
+
+    last_input_timestamp: None = None
+
+
+type _Phase = _WaitingForFirst | _WaitingForSecond | _Running | _Failed
 
 
 class PipelineInitializationPhase(IntEnum):
@@ -81,7 +123,10 @@ class PipelineSmoother(Protocol[FilterStep, SmoothedState]):
         """Number of active, not finalized filter steps."""
 
     def add_step(self, step: FilterStep) -> tuple[SmoothedState, ...]:
-        """Add a forward step and return newly finalized states."""
+        """Add a forward step and return newly finalized states.
+
+        An implementation that raises must leave its window unchanged.
+        """
 
     def provisional(self) -> tuple[SmoothedState, ...]:
         """Return smoothed states currently in the active lag window."""
@@ -123,6 +168,11 @@ class OnlineInflowPipeline:
 
     The pipeline handles timestamp ordering, two-observation initialization,
     partial post-initialization updates, and a bounded smoothing window.
+
+    A call that raises before the smoother accepts a step leaves the pipeline
+    unchanged. A call that raises afterwards cannot be undone, so the pipeline
+    becomes :attr:`failed` and rejects further use until
+    :meth:`restore_state` replaces its state.
     """
 
     def __init__(
@@ -162,17 +212,21 @@ class OnlineInflowPipeline:
                 raise ValueError(
                     "max_window_steps must match smoother.max_window_steps"
                 )
-        self._initial_observation: Observation | None = None
-        self._last_input_timestamp: datetime | None = None
-        self._last_filter_step: FilterStep | None = None
-        self._filter_anchor: FilterStep | None = None
+        self._phase: _Phase = _WaitingForFirst(last_input_timestamp=None)
+        # Raw observations for the smoother's active steps, kept in lockstep.
         self._unfinished_observations: list[Observation] = []
 
     @property
     def initialized(self) -> bool:
         """Whether the first two valid storage observations have been used."""
 
-        return self._last_filter_step is not None
+        return isinstance(self._phase, _Running)
+
+    @property
+    def failed(self) -> bool:
+        """Whether a call failed after the smoothing window had changed."""
+
+        return isinstance(self._phase, _Failed)
 
     @property
     def pending_count(self) -> int:
@@ -190,13 +244,14 @@ class OnlineInflowPipeline:
     def latest_filter_step(self) -> FilterStep | None:
         """The latest forward-filter state, if initialization has completed."""
 
-        return self._last_filter_step
+        phase = self._phase
+        return phase.last_step if isinstance(phase, _Running) else None
 
     @property
     def last_input_timestamp(self) -> datetime | None:
         """The latest accepted timestamp, including skipped start-up data."""
 
-        return self._last_input_timestamp
+        return self._phase.last_input_timestamp
 
     def process(
         self,
@@ -207,31 +262,34 @@ class OnlineInflowPipeline:
     ) -> PipelineUpdate[FilterStep, SmoothedState]:
         """Process one observation and return available outputs."""
 
+        phase = self._phase
+        if isinstance(phase, _Failed):
+            raise RuntimeError(_FAILED_PIPELINE_MESSAGE)
         self._validate_timestamp(timestamp)
         storage = measurement_value(storage, name="storage")
         discharge = measurement_value(discharge, name="discharge")
-        if not self.initialized:
-            update = self._process_initialization(
+        if not isinstance(phase, _Running):
+            return self._process_initialization(
+                phase,
                 timestamp=timestamp,
                 storage=storage,
                 discharge=discharge,
             )
-            self._last_input_timestamp = timestamp
-            return update
 
-        assert self._last_filter_step is not None
         step = self.backend.advance(
-            self._last_filter_step,
+            phase.last_step,
             timestamp=timestamp,
             storage=storage,
             discharge=discharge,
         )
-        finalized = self._add_step(
-            step,
-            observation=Observation(timestamp, storage, discharge),
+        finalized, anchor = self._add_steps(
+            ((step, Observation(timestamp, storage, discharge)),)
         )
-        self._last_filter_step = step
-        self._last_input_timestamp = timestamp
+        self._phase = _Running(
+            last_step=step,
+            anchor=phase.anchor if anchor is None else anchor,
+            last_input_timestamp=timestamp,
+        )
         return PipelineUpdate(
             smoothed_states=finalized,
             filtered_states=(step,),
@@ -250,6 +308,9 @@ class OnlineInflowPipeline:
         observations during :meth:`restore_state`.
         """
 
+        phase = self._phase
+        if isinstance(phase, _Failed):
+            raise RuntimeError(_FAILED_PIPELINE_MESSAGE)
         active_steps = self._active_steps()
         if len(active_steps) != len(self._unfinished_observations):
             raise RuntimeError(
@@ -263,34 +324,33 @@ class OnlineInflowPipeline:
                     "pipeline replay observations are inconsistent with the smoother"
                 )
 
-        if not self.initialized:
-            if active_steps or self._filter_anchor is not None:
+        if not isinstance(phase, _Running):
+            if active_steps:
                 raise RuntimeError("uninitialized pipeline has unexpected filter state")
-            phase = (
-                PipelineInitializationPhase.WAITING_FOR_FIRST
-                if self._initial_observation is None
-                else PipelineInitializationPhase.WAITING_FOR_SECOND
-            )
+            waiting_for_first = isinstance(phase, _WaitingForFirst)
             return PipelineState(
-                phase=phase,
-                last_input_timestamp=self._last_input_timestamp,
-                initial_observation=self._initial_observation,
+                phase=(
+                    PipelineInitializationPhase.WAITING_FOR_FIRST
+                    if waiting_for_first
+                    else PipelineInitializationPhase.WAITING_FOR_SECOND
+                ),
+                last_input_timestamp=phase.last_input_timestamp,
+                initial_observation=None if waiting_for_first else phase.first,
                 filter_anchor=None,
                 unfinished_observations=(),
             )
 
         if not active_steps:
             raise RuntimeError("initialized pipeline has no active smoothing state")
-        phase = (
-            PipelineInitializationPhase.REPLAY_FROM_INITIALIZATION
-            if self._filter_anchor is None
-            else PipelineInitializationPhase.REPLAY_FROM_ANCHOR
-        )
         return PipelineState(
-            phase=phase,
-            last_input_timestamp=self._last_input_timestamp,
+            phase=(
+                PipelineInitializationPhase.REPLAY_FROM_INITIALIZATION
+                if phase.anchor is None
+                else PipelineInitializationPhase.REPLAY_FROM_ANCHOR
+            ),
+            last_input_timestamp=phase.last_input_timestamp,
             initial_observation=None,
-            filter_anchor=self._filter_anchor,
+            filter_anchor=phase.anchor,
             unfinished_observations=tuple(self._unfinished_observations),
         )
 
@@ -299,43 +359,57 @@ class OnlineInflowPipeline:
 
         Replay outputs are deliberately discarded so restoration does not
         re-emit public results that were already returned before checkpointing.
+        A snapshot that fails validation leaves the pipeline unchanged; a
+        restore that fails after it has begun replacing state leaves the
+        pipeline :attr:`failed`. Restoring is the only way out of that state.
         """
 
         if not isinstance(state, PipelineState):
             raise TypeError("state must be a PipelineState instance")
         phase = self._validate_state(state)
-        self._clear_state()
+        try:
+            self._restore_validated_state(state, phase)
+        except BaseException:
+            self._phase = _Failed()
+            raise
 
+    def _restore_validated_state(
+        self,
+        state: PipelineState[FilterStep],
+        phase: PipelineInitializationPhase,
+    ) -> None:
+        """Replace live state with an already validated snapshot."""
+
+        self._clear_state()
+        # _validate_state guarantees the fields each phase reads below.
         if phase is PipelineInitializationPhase.WAITING_FOR_FIRST:
-            self._last_input_timestamp = state.last_input_timestamp
+            self._phase = _WaitingForFirst(state.last_input_timestamp)
             return
         if phase is PipelineInitializationPhase.WAITING_FOR_SECOND:
-            self._initial_observation = state.initial_observation
-            self._last_input_timestamp = state.last_input_timestamp
+            self._phase = _WaitingForSecond(
+                first=cast(Observation, state.initial_observation),
+                last_input_timestamp=cast(datetime, state.last_input_timestamp),
+            )
             return
 
-        if phase is PipelineInitializationPhase.REPLAY_FROM_INITIALIZATION:
-            for observation in state.unfinished_observations:
-                self.process(
-                    timestamp=observation.timestamp,
-                    storage=observation.storage,
-                    discharge=observation.discharge,
-                )
-        else:
-            assert state.filter_anchor is not None
-            self._filter_anchor = state.filter_anchor
-            self._last_filter_step = state.filter_anchor
-            self._last_input_timestamp = state.filter_anchor.timestamp
-            for observation in state.unfinished_observations:
-                self.process(
-                    timestamp=observation.timestamp,
-                    storage=observation.storage,
-                    discharge=observation.discharge,
-                )
+        if phase is PipelineInitializationPhase.REPLAY_FROM_ANCHOR:
+            anchor = cast(FilterStep, state.filter_anchor)
+            self._phase = _Running(
+                last_step=anchor,
+                anchor=anchor,
+                last_input_timestamp=anchor.timestamp,
+            )
+        for observation in state.unfinished_observations:
+            self.process(
+                timestamp=observation.timestamp,
+                storage=observation.storage,
+                discharge=observation.discharge,
+            )
 
-        if self._last_input_timestamp is None or state.last_input_timestamp is None:
+        restored_timestamp = self.last_input_timestamp
+        if restored_timestamp is None or state.last_input_timestamp is None:
             raise RuntimeError("restored pipeline is missing its last input timestamp")
-        if to_utc(self._last_input_timestamp) != to_utc(state.last_input_timestamp):
+        if to_utc(restored_timestamp) != to_utc(state.last_input_timestamp):
             raise RuntimeError(
                 "restored pipeline timestamp does not match its snapshot"
             )
@@ -344,11 +418,8 @@ class OnlineInflowPipeline:
         """Reset state while preserving the backend and smoother settings."""
 
         self._smoother.clear()
-        self._initial_observation = None
-        self._last_input_timestamp = None
-        self._last_filter_step = None
-        self._filter_anchor = None
         self._unfinished_observations.clear()
+        self._phase = _WaitingForFirst(last_input_timestamp=None)
 
     def _validate_state(
         self, state: PipelineState[FilterStep]
@@ -416,6 +487,7 @@ class OnlineInflowPipeline:
 
     def _process_initialization(
         self,
+        phase: _WaitingForFirst | _WaitingForSecond,
         *,
         timestamp: datetime,
         storage: float,
@@ -424,27 +496,31 @@ class OnlineInflowPipeline:
         """Collect the starting observations or build the first filter steps."""
 
         if not isfinite(storage):
+            self._phase = replace(phase, last_input_timestamp=timestamp)
             return PipelineUpdate(
                 smoothed_states=(),
                 filtered_states=(),
             )
 
-        if self._initial_observation is None:
+        if isinstance(phase, _WaitingForFirst):
             if not isfinite(discharge):
                 raise ValueError(
                     "the first valid storage observation needs a finite discharge value"
                 )
-            self._initial_observation = Observation(
-                timestamp=timestamp,
-                storage=storage,
-                discharge=discharge,
+            self._phase = _WaitingForSecond(
+                first=Observation(
+                    timestamp=timestamp,
+                    storage=storage,
+                    discharge=discharge,
+                ),
+                last_input_timestamp=timestamp,
             )
             return PipelineUpdate(
                 smoothed_states=(),
                 filtered_states=(),
             )
 
-        first = self._initial_observation
+        first = phase.first
         second = Observation(
             timestamp=timestamp,
             storage=storage,
@@ -454,36 +530,50 @@ class OnlineInflowPipeline:
         if len(steps) != 2:
             raise ValueError("backend.initialize must return exactly two filter steps")
 
-        finalized: list[SmoothedState] = []
-        finalized.extend(self._add_step(steps[0], observation=first))
-        finalized.extend(self._add_step(steps[1], observation=second))
-        self._last_filter_step = steps[1]
-        self._initial_observation = None
+        finalized, anchor = self._add_steps(((steps[0], first), (steps[1], second)))
+        self._phase = _Running(
+            last_step=steps[1],
+            anchor=anchor,
+            last_input_timestamp=timestamp,
+        )
         return PipelineUpdate(
-            smoothed_states=tuple(finalized),
+            smoothed_states=finalized,
             filtered_states=steps,
         )
 
-    def _add_step(
+    def _add_steps(
         self,
-        step: FilterStep,
-        *,
-        observation: Observation,
-    ) -> tuple[SmoothedState, ...]:
-        """Add one filter step and keep only raw data needed for replay."""
+        steps: Iterable[tuple[FilterStep, Observation]],
+    ) -> tuple[tuple[SmoothedState, ...], FilterStep | None]:
+        """Add filter steps, keeping only the raw data needed for replay.
 
-        finalized = self._smoother.add_step(step)
-        finalized_count = len(finalized)
-        finalized_steps = tuple(self._smoother.last_finalized_steps)
-        if len(finalized_steps) != finalized_count:
-            raise RuntimeError(
-                "smoother finalized state is inconsistent with its outputs"
-            )
-        self._unfinished_observations.append(observation)
-        if finalized_count:
-            self._filter_anchor = finalized_steps[-1]
-            del self._unfinished_observations[:finalized_count]
-        return finalized
+        Returns the newly finalized states and the last step they finalized,
+        if any. Once the smoother has accepted a step, a later failure cannot
+        be undone, so the pipeline moves to its failed phase.
+        """
+
+        finalized: list[SmoothedState] = []
+        anchor: FilterStep | None = None
+        accepted = False
+        try:
+            for step, observation in steps:
+                released = self._smoother.add_step(step)
+                accepted = True
+                released_steps = tuple(self._smoother.last_finalized_steps)
+                if len(released_steps) != len(released):
+                    raise RuntimeError(
+                        "smoother finalized state is inconsistent with its outputs"
+                    )
+                self._unfinished_observations.append(observation)
+                if released_steps:
+                    anchor = released_steps[-1]
+                    del self._unfinished_observations[: len(released_steps)]
+                finalized.extend(released)
+        except BaseException:
+            if accepted:
+                self._phase = _Failed()
+            raise
+        return tuple(finalized), anchor
 
     def _active_steps(self) -> tuple[FilterStep, ...]:
         """Read active forward-filter steps in timestamp order."""
@@ -494,9 +584,8 @@ class OnlineInflowPipeline:
         """Check that a new timestamp is aware and later than the previous one."""
 
         aware_timestamp(timestamp)
-        if self._last_input_timestamp is not None and to_utc(timestamp) <= to_utc(
-            self._last_input_timestamp
-        ):
+        previous = self.last_input_timestamp
+        if previous is not None and to_utc(timestamp) <= to_utc(previous):
             raise ValueError("observation timestamps must be strictly increasing")
 
 

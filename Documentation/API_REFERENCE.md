@@ -13,7 +13,7 @@ compatibility promise.
 | Export | Purpose |
 | --- | --- |
 | `Observation(timestamp, storage, discharge)` | Immutable streaming input. Timestamp must be timezone-aware and no finer than microsecond precision; use `NaN` for a missing value after initialization. |
-| `OnlineReservoirInflow` | Streaming estimator; defaults to acre-ft/cfs. Pass `unit_system=UnitSystem.si()` for m³ and m³/s. Construct with the five scalar diagonal noise values; use `process(observation)`, `process_many`, `initialized`, and `pending_count`. Set keyword-only `include_uncertainty=True` to publish inflow standard deviations. |
+| `OnlineReservoirInflow` | Streaming estimator; defaults to acre-ft/cfs. Pass `unit_system=UnitSystem.si()` for m³ and m³/s. Construct with the five scalar diagonal noise values; use `process(observation)`, `process_many`, `initialized`, `pending_count`, and `failed`. Set keyword-only `include_uncertainty=True` to publish inflow standard deviations. |
 | `OnlineReservoirInflow.from_config(config, include_uncertainty=False)` | Creates a stream from reviewed configuration, including its units and smoothing lag. Set `include_uncertainty=True` to publish inflow standard deviations. |
 | `OnlineReservoirInflow.from_checkpoint(checkpoint, config=..., include_uncertainty=False)` | Restores a configured stream. The reservoir ID and fingerprinted model, covariance, lag, and unit settings must match. Choose the uncertainty output option again when restoring. |
 | `OnlineReservoirInflow.checkpoint()` | Produces resumable state after a successful call. It requires a reservoir ID; streams made with `from_config` have one. |
@@ -141,7 +141,7 @@ reservoir units.
 | `SmoothedStep` | Immutable smoothed timestamp, state mean/covariance, and provenance flags. |
 | `StateSpaceModel` / `ReservoirStateSpaceModel` | Protocol and physical three-state reservoir implementation. The reservoir state order is `[storage, inflow_rate, true_outflow_rate]`. |
 | `ReservoirBackend` | Connects `ReservoirStateSpaceModel` to the generic pipeline. |
-| `OnlineInflowPipeline` / `PipelineUpdate` | Generic ordered-stream coordinator and its per-call results. Use when supplying a compatible custom backend and smoother. |
+| `OnlineInflowPipeline` / `PipelineUpdate` | Generic ordered-stream coordinator and its per-call results. Use when supplying a compatible custom backend and smoother. A custom smoother's `add_step` must leave its window unchanged when it raises. |
 
 `OnlineFixedLagRTS` releases a state once the elapsed-time lag has passed and
 raises `OverflowError` if its active window reaches `max_window_steps` before

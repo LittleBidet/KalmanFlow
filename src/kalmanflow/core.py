@@ -8,6 +8,7 @@ from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import Enum, auto
 from statistics import NormalDist
 from typing import Final
 
@@ -35,6 +36,23 @@ from .time_utils import aware_timestamp, to_utc, validate_timestamp_precision
 from .units import UnitSystem
 
 _DEFAULT_UNITS: Final = UnitSystem.us_customary()
+
+_FAILED_STREAM_MESSAGE: Final = (
+    "stream failed after its state changed and may have lost outputs; "
+    "restore from a checkpoint or create a new stream"
+)
+
+
+class _StreamStatus(Enum):
+    """Lifecycle of one public reservoir stream."""
+
+    # Idle. No call has succeeded since creation, restore, or a rejected call.
+    AWAITING_SUCCESS = auto()
+    # Idle. The last call completed and returned all of its outputs.
+    CHECKPOINTABLE = auto()
+    PROCESSING = auto()
+    # Terminal. A call failed after state changed, so outputs may be lost.
+    FAILED = auto()
 
 
 def _validate_include_uncertainty(value: object) -> bool:
@@ -232,8 +250,7 @@ class OnlineReservoirInflow:
         self._include_uncertainty = _validate_include_uncertainty(
             include_uncertainty
         )
-        self._processing = False
-        self._checkpoint_ready = False
+        self._status = _StreamStatus.AWAITING_SUCCESS
 
     @classmethod
     def from_config(
@@ -260,8 +277,7 @@ class OnlineReservoirInflow:
         instance._include_uncertainty = _validate_include_uncertainty(
             include_uncertainty
         )
-        instance._processing = False
-        instance._checkpoint_ready = False
+        instance._status = _StreamStatus.AWAITING_SUCCESS
         return instance
 
     @classmethod
@@ -315,16 +331,30 @@ class OnlineReservoirInflow:
 
         return self._reservoir_id
 
+    @property
+    def failed(self) -> bool:
+        """Whether a call failed after the stream had already changed.
+
+        A failed stream may have lost outputs, so it rejects further
+        ``process``, ``process_many``, and ``checkpoint`` calls. Restore from a
+        checkpoint or create a new stream instead.
+        """
+
+        return self._status is _StreamStatus.FAILED
+
     def process(self, observation: ObservationLike) -> ReservoirFlowUpdate:
         """Process one observation and return currently available flow outputs.
 
         Checkpoints become available only after this update is fully constructed.
+        A call rejected before the stream changes leaves it usable; a call that
+        fails after the observation was absorbed leaves it :attr:`failed`.
         """
 
+        self._require_usable()
         try:
             values = _process_values_from_observation(observation)
         except Exception:
-            self._mark_preprocessing_failure()
+            self._mark_rejected()
             raise
         return self._process_one_value(values)
 
@@ -335,15 +365,17 @@ class OnlineReservoirInflow:
 
         The returned updates are equivalent to calling :meth:`process` for
         each input in order. If any input fails, the stream is restored to its
-        entry state and no partial group result is returned.
+        entry state and no partial group result is returned. If that restore
+        itself fails, the stream is left :attr:`failed`.
         """
 
+        self._require_usable()
         try:
             values = tuple(
                 _process_values_from_observation(item) for item in observations
             )
         except Exception:
-            self._mark_preprocessing_failure()
+            self._mark_rejected()
             raise
         if not values:
             return ()
@@ -352,9 +384,12 @@ class OnlineReservoirInflow:
     def checkpoint(self) -> bytes:
         """Return a compact checkpoint after a fully completed process call."""
 
-        if self._processing:
+        status = self._status
+        if status is _StreamStatus.PROCESSING:
             raise RuntimeError("cannot create a checkpoint while processing")
-        if not self._checkpoint_ready:
+        if status is _StreamStatus.FAILED:
+            raise RuntimeError(_FAILED_STREAM_MESSAGE)
+        if status is _StreamStatus.AWAITING_SUCCESS:
             raise RuntimeError(
                 "cannot create a checkpoint before a successful process result"
             )
@@ -375,62 +410,82 @@ class OnlineReservoirInflow:
     ) -> tuple[ReservoirFlowUpdate, ...]:
         """Process pre-extracted inputs transactionally and construct outputs."""
 
-        if self._processing:
-            raise RuntimeError("process calls may not be re-entered")
-        self._processing = True
-        self._checkpoint_ready = False
-        entry_state = None
+        self._begin_processing()
+        # Nothing has changed until the entry snapshot exists.
+        outcome = _StreamStatus.AWAITING_SUCCESS
         try:
             entry_state = self._pipeline.export_state()
-            self._validate_complete_order(values)
-            updates = tuple(
-                self._to_public_update(
-                    self._pipeline.process(
-                        timestamp=timestamp,
-                        storage=storage,
-                        discharge=discharge,
+            try:
+                self._validate_complete_order(values)
+                updates = tuple(
+                    self._to_public_update(
+                        self._pipeline.process(
+                            timestamp=timestamp,
+                            storage=storage,
+                            discharge=discharge,
+                        )
                     )
+                    for timestamp, storage, discharge in values
                 )
-                for timestamp, storage, discharge in values
-            )
-        except Exception:
-            if entry_state is not None:
+            except BaseException:
+                outcome = _StreamStatus.FAILED
                 try:
                     self._pipeline.restore_state(entry_state)
                 except Exception as rollback_error:
                     raise RuntimeError(
                         "processing failed and the stream could not be restored"
                     ) from rollback_error
-            raise
-        else:
-            self._checkpoint_ready = True
+                outcome = _StreamStatus.AWAITING_SUCCESS
+                raise
+            outcome = _StreamStatus.CHECKPOINTABLE
             return updates
         finally:
-            self._processing = False
+            self._status = outcome
 
     def _process_one_value(
         self,
         value: tuple[datetime, float, float],
     ) -> ReservoirFlowUpdate:
-        """Process one observation without copying the active replay window."""
+        """Process one observation without copying the active replay window.
 
-        if self._processing:
-            raise RuntimeError("process calls may not be re-entered")
-        self._processing = True
-        self._checkpoint_ready = False
+        Without a snapshot there is no rollback: if building the public update
+        fails after the pipeline advanced, that update is lost and the stream
+        is marked failed rather than left looking healthy.
+        """
+
+        self._begin_processing()
+        outcome = _StreamStatus.FAILED
         try:
             timestamp, storage, discharge = value
-            update = self._to_public_update(
-                self._pipeline.process(
+            try:
+                pipeline_update = self._pipeline.process(
                     timestamp=timestamp,
                     storage=storage,
                     discharge=discharge,
                 )
-            )
-            self._checkpoint_ready = True
+            except BaseException:
+                if not self._pipeline.failed:
+                    # The pipeline rejected the input without changing.
+                    outcome = _StreamStatus.AWAITING_SUCCESS
+                raise
+            update = self._to_public_update(pipeline_update)
+            outcome = _StreamStatus.CHECKPOINTABLE
             return update
         finally:
-            self._processing = False
+            self._status = outcome
+
+    def _require_usable(self) -> None:
+        """Reject every call on a stream that may have lost outputs."""
+
+        if self._status is _StreamStatus.FAILED:
+            raise RuntimeError(_FAILED_STREAM_MESSAGE)
+
+    def _begin_processing(self) -> None:
+        """Enter the processing state, rejecting re-entrant calls."""
+
+        if self._status is _StreamStatus.PROCESSING:
+            raise RuntimeError("process calls may not be re-entered")
+        self._status = _StreamStatus.PROCESSING
 
     def _validate_complete_order(
         self,
@@ -449,11 +504,15 @@ class OnlineReservoirInflow:
                 raise ValueError("observation timestamps must be strictly increasing")
             previous_utc = timestamp_utc
 
-    def _mark_preprocessing_failure(self) -> None:
-        """Make a failed public process call ineligible for checkpointing."""
+    def _mark_rejected(self) -> None:
+        """Make a rejected public call ineligible for checkpointing.
 
-        if not self._processing:
-            self._checkpoint_ready = False
+        A re-entrant call rejected during processing leaves the outer call's
+        status alone.
+        """
+
+        if self._status is _StreamStatus.CHECKPOINTABLE:
+            self._status = _StreamStatus.AWAITING_SUCCESS
 
     def _to_public_update(self, update) -> ReservoirFlowUpdate:
         """Create public flow outputs before the stream becomes checkpointable."""

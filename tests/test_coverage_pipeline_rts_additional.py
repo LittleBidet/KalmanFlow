@@ -15,6 +15,8 @@ from kalmanflow.observations import Observation
 from kalmanflow.pipeline import (
     PipelineInitializationPhase,
     PipelineState,
+    _Running,
+    _WaitingForFirst,
 )
 
 START = datetime(2024, 1, 1, tzinfo=UTC)
@@ -134,12 +136,15 @@ def test_pipeline_export_rejects_inconsistent_live_state() -> None:
         pipeline.export_state()
 
     pipeline = _pipeline()
-    pipeline._filter_anchor = _Step(START)
+    pipeline._unfinished_observations.append(_observation(0))
+    pipeline._smoother._active.append(_Step(START))
     with pytest.raises(RuntimeError, match="unexpected filter state"):
         pipeline.export_state()
 
     pipeline = _pipeline()
-    pipeline._last_filter_step = _Step(START)
+    pipeline._phase = _Running(
+        last_step=_Step(START), anchor=None, last_input_timestamp=START
+    )
     with pytest.raises(RuntimeError, match="no active smoothing state"):
         pipeline.export_state()
 
@@ -247,17 +252,19 @@ def test_pipeline_restore_and_snapshot_validation_errors(
     monkeypatch.setattr(pipeline, "process", lambda **kwargs: None)
     with pytest.raises(RuntimeError, match="missing its last input timestamp"):
         pipeline.restore_state(replay_state)
+    assert pipeline.failed
 
     pipeline = _pipeline()
     monkeypatch.setattr(
         pipeline,
         "process",
         lambda **kwargs: setattr(
-            pipeline, "_last_input_timestamp", START + timedelta(hours=1)
+            pipeline, "_phase", _WaitingForFirst(START + timedelta(hours=1))
         ),
     )
     with pytest.raises(RuntimeError, match="does not match its snapshot"):
         pipeline.restore_state(replay_state)
+    assert pipeline.failed
 
 
 def test_pipeline_add_step_detects_inconsistent_finalized_outputs() -> None:
@@ -266,7 +273,8 @@ def test_pipeline_add_step_detects_inconsistent_finalized_outputs() -> None:
     modern.add_step = lambda step: (object(),)
     pipeline = _pipeline(modern)
     with pytest.raises(RuntimeError, match="inconsistent with its outputs"):
-        pipeline._add_step(_Step(START), observation=_observation(0))
+        pipeline._add_steps(((_Step(START), _observation(0)),))
+    assert pipeline.failed
 
 
 @pytest.mark.parametrize(
