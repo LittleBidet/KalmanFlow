@@ -1,6 +1,6 @@
 """Application-specific preparation of Aquarius reservoir source series.
 
-This module parses the checked-in Aquarius exports used by the offline Bayesian
+This module parses the checked-in Aquarius exports used by the offline noise
 calibration workflow. It intentionally lives outside the generalizable :mod:`kalmanflow`
 package, whose APIs accept already-cleaned and aligned observations.
 """

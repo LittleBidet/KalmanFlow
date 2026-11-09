@@ -9,47 +9,47 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
-from applications import run_bayesian_tuner
+from applications import run_noise_tuner
 
 
 def test_split_validation_windows_reject_short_or_naive_indexes() -> None:
-    with pytest.raises(ValueError, match="at least three observations"):
-        run_bayesian_tuner.split_validation_windows(
-            pd.date_range("2025-01-01", periods=2, freq="h", tz="UTC")
+    with pytest.raises(ValueError, match="at least 6 observations"):
+        run_noise_tuner.split_validation_windows(
+            pd.date_range("2025-01-01", periods=5, freq="h", tz="UTC")
         )
     with pytest.raises(ValueError, match="timezone-aware"):
-        run_bayesian_tuner.split_validation_windows(
-            pd.date_range("2025-01-01", periods=3, freq="h")
+        run_noise_tuner.split_validation_windows(
+            pd.date_range("2025-01-01", periods=6, freq="h")
         )
 
 
 def test_window_capacity_uses_second_finite_storage_for_warmup() -> None:
-    index = pd.date_range("2025-01-01", periods=144, freq="h", tz="UTC")
-    storage = np.arange(144.0)
+    index = pd.date_range("2025-01-01", periods=288, freq="h", tz="UTC")
+    storage = np.arange(288.0)
     storage[1:20] = np.nan
     observations = pd.DataFrame(
         {"storage": storage, "outflow": 4.0},
         index=index,
     )
-    windows = run_bayesian_tuner.split_validation_windows(index)
+    windows = run_noise_tuner.split_validation_windows(index)
 
     with pytest.raises(ValueError, match="validation-1 has 4"):
-        run_bayesian_tuner._validate_window_capacity(
+        run_noise_tuner._validate_window_capacity(
             observations,
             windows,
-            run_bayesian_tuner.build_evaluation_settings(),
+            run_noise_tuner.build_evaluation_settings(),
         )
 
 
 def test_runner_rejects_invalid_dates_before_loading_data(tmp_path) -> None:
     with pytest.raises(ValueError, match="DATA_START must be timezone-aware"):
-        run_bayesian_tuner.run_bayesian_tuner(
+        run_noise_tuner.run_noise_tuner(
             project_root=tmp_path,
             data_start="2025-01-01",
             data_end="2025-01-02T00:00:00Z",
         )
     with pytest.raises(ValueError, match="DATA_END must be after"):
-        run_bayesian_tuner.run_bayesian_tuner(
+        run_noise_tuner.run_noise_tuner(
             project_root=tmp_path,
             data_start="2025-01-02T00:00:00Z",
             data_end="2025-01-01T00:00:00Z",
@@ -58,7 +58,7 @@ def test_runner_rejects_invalid_dates_before_loading_data(tmp_path) -> None:
 
 def test_runner_rejects_unsupported_reservoir(tmp_path) -> None:
     with pytest.raises(ValueError, match="Unsupported reservoir"):
-        run_bayesian_tuner.run_bayesian_tuner(
+        run_noise_tuner.run_noise_tuner(
             project_root=tmp_path,
             reservoir="Unknown",
             data_start="2025-01-01T00:00:00Z",
@@ -69,7 +69,7 @@ def test_runner_rejects_unsupported_reservoir(tmp_path) -> None:
 def test_runner_rejects_identical_resolved_output_paths(tmp_path) -> None:
     output_path = tmp_path / "same.json"
     with pytest.raises(ValueError, match="must be different files"):
-        run_bayesian_tuner.run_bayesian_tuner(
+        run_noise_tuner.run_noise_tuner(
             project_root=tmp_path,
             output_path=output_path,
             report_output_path=output_path,
@@ -79,7 +79,7 @@ def test_runner_rejects_identical_resolved_output_paths(tmp_path) -> None:
 def test_json_export_replaces_nonfinite_values_with_null(tmp_path) -> None:
     output_path = tmp_path / "nonfinite.json"
 
-    run_bayesian_tuner._write_json(
+    run_noise_tuner._write_json(
         {"nan": np.nan, "positive_infinity": np.inf}, output_path
     )
 
@@ -92,7 +92,7 @@ def test_json_export_replaces_nonfinite_values_with_null(tmp_path) -> None:
 def test_runner_preserves_current_tuner_inputs_and_exports_two_artifacts(
     monkeypatch, capsys, tmp_path
 ) -> None:
-    index = pd.date_range("2025-01-01", periods=144, freq="h", tz="UTC")
+    index = pd.date_range("2025-01-01", periods=288, freq="h", tz="UTC")
     observations = pd.DataFrame(
         {
             "storage": np.linspace(100.0, 200.0, len(index)),
@@ -102,7 +102,7 @@ def test_runner_preserves_current_tuner_inputs_and_exports_two_artifacts(
     )
     calls: dict[str, object] = {}
     monkeypatch.setattr(
-        run_bayesian_tuner,
+        run_noise_tuner,
         "sources_for_reservoir",
         lambda project_root, reservoir: (project_root, reservoir),
     )
@@ -116,8 +116,8 @@ def test_runner_preserves_current_tuner_inputs_and_exports_two_artifacts(
         )
         return SimpleNamespace(observations=observations)
 
-    monkeypatch.setattr(run_bayesian_tuner, "prepare_reservoir_data", fake_prepare)
-    config = run_bayesian_tuner.build_base_config("Lexington")
+    monkeypatch.setattr(run_noise_tuner, "prepare_reservoir_data", fake_prepare)
+    config = run_noise_tuner.build_base_config("Lexington")
 
     def fake_tune(**kwargs):
         calls.update(kwargs)
@@ -131,39 +131,40 @@ def test_runner_preserves_current_tuner_inputs_and_exports_two_artifacts(
                 "r_outflow": 4.0,
             },
             selected_objective=0.02,
-            selection_threshold=0.02,
-            selection_reason="calibrated competitive trial",
-            competitive_trial_ids=(2,),
+            base_objective=0.5,
+            improvement_standard_error=0.01,
+            identifiability=pd.DataFrame(),
             warnings=(),
             timing_seconds={"total_seconds": 0.1},
-            candidate_summary=pd.DataFrame({"trial_id": [2], "selected": [True]}),
+            candidate_summary=pd.DataFrame(
+                {"candidate": ["search-1"], "selected": [True]}
+            ),
             window_diagnostics=pd.DataFrame({"window": ["validation-1"]}),
             proxy_diagnostics=pd.DataFrame(),
         )
 
-    monkeypatch.setattr(run_bayesian_tuner, "tune_inflow_noise_bayesian", fake_tune)
-    output_path = tmp_path / "bayesian-config.json"
-    report_output_path = tmp_path / "bayesian-report.json"
-    result = run_bayesian_tuner.run_bayesian_tuner(
+    monkeypatch.setattr(run_noise_tuner, "tune_inflow_noise", fake_tune)
+    output_path = tmp_path / "noise-config.json"
+    report_output_path = tmp_path / "noise-report.json"
+    result = run_noise_tuner.run_noise_tuner(
         project_root=tmp_path,
         reservoir="Lexington",
         data_start="2025-01-01T00:00:00-08:00",
-        data_end="2025-01-07T00:00:00-08:00",
+        data_end="2025-01-13T00:00:00-08:00",
         output_path=output_path,
         report_output_path=report_output_path,
     )
 
-    default_result = run_bayesian_tuner.run_bayesian_tuner(
+    default_result = run_noise_tuner.run_noise_tuner(
         project_root=tmp_path,
         reservoir="Lexington",
         data_start="2025-01-01T00:00:00-08:00",
-        data_end="2025-01-07T00:00:00-08:00",
+        data_end="2025-01-13T00:00:00-08:00",
     )
 
-    assert result.competitive_trial_ids == (2,)
-    assert default_result.competitive_trial_ids == (2,)
+    assert result.selected_objective == default_result.selected_objective == 0.02
     assert calls["start"] == pd.Timestamp("2025-01-01T08:00:00Z")
-    assert calls["end"] == pd.Timestamp("2025-01-07T08:00:00Z")
+    assert calls["end"] == pd.Timestamp("2025-01-13T08:00:00Z")
     assert calls["inflow_increment_sd_seeds"] == (
         2.0,
         5.0,
@@ -171,7 +172,7 @@ def test_runner_preserves_current_tuner_inputs_and_exports_two_artifacts(
         20.0,
         40.0,
     )
-    assert len(calls["validation_windows"]) == 3
+    assert len(calls["validation_windows"]) == 6
     exported_config = json.loads(output_path.read_text(encoding="utf-8"))
     assert exported_config["reservoir_id"] == "lexington"
     assert exported_config["configuration_version"] == config.configuration_version
@@ -186,11 +187,11 @@ def test_runner_preserves_current_tuner_inputs_and_exports_two_artifacts(
     assert "candidate_summary" not in exported_config
 
     exported_report = json.loads(report_output_path.read_text(encoding="utf-8"))
-    assert exported_report["selection"]["competitive_trial_ids"] == [2]
     assert exported_report["selection"]["selected_objective"] == 0.02
+    assert exported_report["selection"]["base_objective"] == 0.5
     assert "detailed_regime_report" not in exported_report
     assert "forecast_horizon_report" not in exported_report
-    assert "competitive_trial_ids" in exported_report["selection"]
+    assert "identifiability" in exported_report
     assert "selected_config" not in exported_report
     assert exported_report["selected_config_reference"]["reservoir_id"] == "lexington"
     assert exported_report["selected_config_reference"]["path"] == str(
@@ -199,8 +200,8 @@ def test_runner_preserves_current_tuner_inputs_and_exports_two_artifacts(
     default_output_path = (
         tmp_path
         / "Outputs"
-        / "bayesian_tuning"
-        / "lexington-2026-08-bayesian-noise-candidate.json"
+        / "noise_tuning"
+        / "lexington-2026-11-ml-noise-candidate.json"
     )
     assert default_output_path.is_file()
     assert "candidate_summary" not in json.loads(

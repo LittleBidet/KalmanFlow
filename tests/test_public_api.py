@@ -31,14 +31,14 @@ EXPECTED_EXPORTS = {
     "predict_state",
     "run_inflow_model",
     "smooth_filter_steps",
-    "BayesianEvaluationSettings",
-    "BayesianTuningError",
     "ConfigEvaluationResult",
+    "NoiseEvaluationSettings",
+    "NoiseTuningError",
+    "NoiseTuningResult",
+    "NoiseTuningSettings",
     "ValidationWindow",
     "evaluate_configuration",
-    "BayesianTuningResult",
-    "BayesianTuningSettings",
-    "tune_inflow_noise_bayesian",
+    "tune_inflow_noise",
 }
 
 

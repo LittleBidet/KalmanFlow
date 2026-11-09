@@ -23,7 +23,7 @@ ROOT = Path(__file__).parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from applications import preparation, run_bayesian_tuner  # noqa: E402
+from applications import preparation, run_noise_tuner  # noqa: E402
 
 
 def _write_aquarius(path: Path, index: pd.DatetimeIndex, values: list[object]) -> None:
@@ -149,27 +149,27 @@ def test_preparation_validation_frame_checks_all_invariants() -> None:
 
 
 def test_tuner_validates_edges_and_serializes_all_supported_values(
-    tmp_path: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    index = pd.date_range("2025-01-01", periods=6, freq="h", tz="UTC")
+    index = pd.date_range("2025-01-01", periods=12, freq="h", tz="UTC")
     with pytest.raises(TypeError, match="DatetimeIndex"):
-        run_bayesian_tuner.split_validation_windows(list(index))
+        run_noise_tuner.split_validation_windows(list(index))
     with pytest.raises(ValueError, match="increasing and unique"):
-        run_bayesian_tuner.split_validation_windows(index[[0, 1, 1, 3, 4, 5]])
+        run_noise_tuner.split_validation_windows(index[[0, 1, 1, 3, 4, 5, 6, 7]])
     with pytest.raises(ValueError, match="reservoir must not be empty"):
-        run_bayesian_tuner.build_base_config("  ")
+        run_noise_tuner.build_base_config("  ")
     with pytest.raises(ValueError, match="valid timestamp"):
-        run_bayesian_tuner._timestamp("not-a-date", "when")
+        run_noise_tuner._timestamp("not-a-date", "when")
 
-    observations = pd.DataFrame({"storage": [np.nan] * 6, "outflow": 1.0}, index=index)
+    observations = pd.DataFrame({"storage": np.nan, "outflow": 1.0}, index=index)
     with pytest.raises(ValueError, match="at least two finite"):
-        run_bayesian_tuner._validate_window_capacity(
+        run_noise_tuner._validate_window_capacity(
             observations,
-            run_bayesian_tuner.split_validation_windows(index),
-            run_bayesian_tuner.build_evaluation_settings(),
+            run_noise_tuner.split_validation_windows(index),
+            run_noise_tuner.build_evaluation_settings(),
         )
 
-    value = run_bayesian_tuner._json_value(
+    value = run_noise_tuner._json_value(
         {
             "timestamp": pd.Timestamp("2025-01-01T00:00:00Z"),
             "duration": timedelta(seconds=2),
@@ -186,22 +186,22 @@ def test_tuner_validates_edges_and_serializes_all_supported_values(
     assert value["mapping"] == {"1": [3]}
     assert value["nan"] is None
 
-    assert run_bayesian_tuner._frame_records(None) == []
-    config = run_bayesian_tuner.build_base_config("Chesbro")
+    assert run_noise_tuner._frame_records(None) == []
+    config = run_noise_tuner.build_base_config("Chesbro")
     result = SimpleNamespace(
         selected_config=config,
         selected_parameters={},
         selected_objective=float("nan"),
-        selection_threshold=float("inf"),
-        selection_reason="test",
-        competitive_trial_ids=(),
+        base_objective=0.5,
+        improvement_standard_error=0.01,
+        identifiability=pd.DataFrame(),
         warnings=(),
         timing_seconds={},
         candidate_summary=pd.DataFrame(),
         window_diagnostics=pd.DataFrame(),
         proxy_diagnostics=pd.DataFrame(),
     )
-    report = run_bayesian_tuner.export_bayesian_tuning_report(
+    report = run_noise_tuner.export_noise_tuning_report(
         result, tmp_path / "report.json"
     )
     payload = json.loads(report.read_text(encoding="utf-8"))
@@ -209,13 +209,18 @@ def test_tuner_validates_edges_and_serializes_all_supported_values(
     assert payload["selection"]["selected_objective"] is None
 
     result.warnings = ("warning",)
-    run_bayesian_tuner._print_result(result)
+    run_noise_tuner._print_result(result)
+    result.identifiability = pd.DataFrame(
+        {"curvature": [1.0]}, index=pd.Index(["q_inflow"], name="parameter")
+    )
+    run_noise_tuner._print_result(result)
+    assert "Identifiability:" in capsys.readouterr().out
 
 
 def test_tuner_import_path_setup_and_main_entrypoint(monkeypatch) -> None:
-    module_name = "applications.run_bayesian_tuner"
-    root_text = str(run_bayesian_tuner.PROJECT_ROOT)
-    src_text = str(run_bayesian_tuner.SRC_ROOT)
+    module_name = "applications.run_noise_tuner"
+    root_text = str(run_noise_tuner.PROJECT_ROOT)
+    src_text = str(run_noise_tuner.SRC_ROOT)
     original = sys.path[:]
     try:
         sys.path[:] = [
@@ -228,59 +233,59 @@ def test_tuner_import_path_setup_and_main_entrypoint(monkeypatch) -> None:
 
     called: list[bool] = []
     monkeypatch.setattr(
-        run_bayesian_tuner,
-        "run_bayesian_tuner",
+        run_noise_tuner,
+        "run_noise_tuner",
         lambda: called.append(True),
     )
-    run_bayesian_tuner.main()
+    run_noise_tuner.main()
     assert called == [True]
 
 
 def test_tuner_runner_handles_empty_short_data_and_upstream_proxy(
     monkeypatch, tmp_path: Path
 ) -> None:
-    index = pd.date_range("2025-01-01", periods=144, freq="h", tz="UTC")
+    index = pd.date_range("2025-01-01", periods=288, freq="h", tz="UTC")
     full = pd.DataFrame(
         {"storage": np.linspace(100.0, 200.0, len(index)), "outflow": 4.0},
         index=index,
     )
     monkeypatch.setattr(
-        run_bayesian_tuner,
+        run_noise_tuner,
         "sources_for_reservoir",
         lambda root, reservoir: (root, reservoir),
     )
     monkeypatch.setattr(
-        run_bayesian_tuner,
+        run_noise_tuner,
         "prepare_reservoir_data",
         lambda *args, **kwargs: SimpleNamespace(observations=pd.DataFrame()),
     )
     with pytest.raises(ValueError, match="produced no observations"):
-        run_bayesian_tuner.run_bayesian_tuner(
+        run_noise_tuner.run_noise_tuner(
             project_root=tmp_path,
             data_start=index[0],
             data_end=index[-1],
         )
 
     monkeypatch.setattr(
-        run_bayesian_tuner,
+        run_noise_tuner,
         "prepare_reservoir_data",
         lambda *args, **kwargs: SimpleNamespace(observations=full.iloc[:2]),
     )
-    with pytest.raises(ValueError, match="at least three"):
-        run_bayesian_tuner.run_bayesian_tuner(
+    with pytest.raises(ValueError, match="at least 6 observations"):
+        run_noise_tuner.run_noise_tuner(
             project_root=tmp_path,
             data_start=index[0],
             data_end=index[-1],
         )
 
-    config = run_bayesian_tuner.build_base_config("Chesbro")
+    config = run_noise_tuner.build_base_config("Chesbro")
     fake_result = SimpleNamespace(
         selected_config=config,
         selected_parameters={},
         selected_objective=0.1,
-        selection_threshold=0.1,
-        selection_reason="test",
-        competitive_trial_ids=(),
+        base_objective=0.5,
+        improvement_standard_error=0.01,
+        identifiability=pd.DataFrame(),
         warnings=(),
         timing_seconds={},
         candidate_summary=pd.DataFrame(),
@@ -294,7 +299,7 @@ def test_tuner_runner_handles_empty_short_data_and_upstream_proxy(
         return fake_result
 
     monkeypatch.setattr(
-        run_bayesian_tuner,
+        run_noise_tuner,
         "prepare_reservoir_data",
         lambda *args, **kwargs: SimpleNamespace(
             observations=full,
@@ -303,8 +308,8 @@ def test_tuner_runner_handles_empty_short_data_and_upstream_proxy(
             ),
         ),
     )
-    monkeypatch.setattr(run_bayesian_tuner, "tune_inflow_noise_bayesian", fake_tune)
-    run_bayesian_tuner.run_bayesian_tuner(
+    monkeypatch.setattr(run_noise_tuner, "tune_inflow_noise", fake_tune)
+    run_noise_tuner.run_noise_tuner(
         project_root=tmp_path,
         output_path=tmp_path / "config.json",
         report_output_path=tmp_path / "report.json",
@@ -319,14 +324,14 @@ def test_tuner_runner_handles_empty_short_data_and_upstream_proxy(
     # A diagnostics frame without the optional proxy exercises the runner's
     # normal no-proxy path after the diagnostics frame has been recognized.
     monkeypatch.setattr(
-        run_bayesian_tuner,
+        run_noise_tuner,
         "prepare_reservoir_data",
         lambda *args, **kwargs: SimpleNamespace(
             observations=full,
             diagnostics=pd.DataFrame({"other": np.ones(len(index))}, index=index),
         ),
     )
-    run_bayesian_tuner.run_bayesian_tuner(
+    run_noise_tuner.run_noise_tuner(
         project_root=tmp_path,
         output_path=tmp_path / "config-no-proxy.json",
         data_start=index[0],
@@ -355,24 +360,24 @@ def test_notebook_compatibility_import_and_main_script(capsys) -> None:
     assert "estimated_inflow" in capsys.readouterr().out
 
 
-def test_bayesian_tuner_module_script_entrypoint(
+def test_noise_tuner_module_script_entrypoint(
     monkeypatch, capsys, tmp_path: Path
 ) -> None:
     """Run the real file as a script with a deterministic in-memory dataset."""
 
-    index = pd.date_range("2022-10-01", periods=144, freq="h", tz="UTC")
+    index = pd.date_range("2022-10-01", periods=288, freq="h", tz="UTC")
     observations = pd.DataFrame(
         {"storage": np.linspace(100.0, 200.0, len(index)), "outflow": 4.0},
         index=index,
     )
-    config = run_bayesian_tuner.build_base_config("Chesbro")
+    config = run_noise_tuner.build_base_config("Chesbro")
     fake_result = SimpleNamespace(
         selected_config=config,
         selected_parameters={},
         selected_objective=0.1,
-        selection_threshold=0.1,
-        selection_reason="script test",
-        competitive_trial_ids=(),
+        base_objective=0.5,
+        improvement_standard_error=0.01,
+        identifiability=pd.DataFrame(),
         warnings=(),
         timing_seconds={},
         candidate_summary=pd.DataFrame(),
@@ -396,17 +401,17 @@ def test_bayesian_tuner_module_script_entrypoint(
     )
     monkeypatch.setattr(
         importlib.import_module("kalmanflow"),
-        "tune_inflow_noise_bayesian",
+        "tune_inflow_noise",
         lambda **kwargs: fake_result,
     )
-    source_path = ROOT / "applications" / "run_bayesian_tuner.py"
+    source_path = ROOT / "applications" / "run_noise_tuner.py"
     temporary_file = tmp_path / "applications" / source_path.name
     temporary_file.parent.mkdir(parents=True)
     temporary_root = str(tmp_path)
     temporary_src = str(tmp_path / "src")
     source = source_path.read_text(encoding="utf-8")
     # Compile with the real source filename so coverage records the script's
-    # entry-point branch against applications/run_bayesian_tuner.py, while
+    # entry-point branch against applications/run_noise_tuner.py, while
     # __file__ points into pytest's temporary directory for all output paths.
     try:
         exec(
@@ -420,11 +425,11 @@ def test_bayesian_tuner_module_script_entrypoint(
     output_path = (
         tmp_path
         / "Outputs"
-        / "bayesian_tuning"
-        / ("chesbro-2026-08-bayesian-noise-candidate.json")
+        / "noise_tuning"
+        / "chesbro-2026-11-ml-noise-candidate.json"
     )
     assert output_path.is_file()
-    assert "Bayesian tuning configuration exported" in capsys.readouterr().out
+    assert "Noise tuning configuration exported" in capsys.readouterr().out
 
 
 def test_notebook_compatibility_import_path_branch() -> None:

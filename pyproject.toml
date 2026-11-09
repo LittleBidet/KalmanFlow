@@ -28,7 +28,6 @@ Documentation = "https://github.com/LittleBidet/KalmanFlow/tree/main/Documentati
 
 [project.optional-dependencies]
 tuning = [
-    "scikit-learn>=1.9.0",
     "scipy>=1.18.1",
 ]
 

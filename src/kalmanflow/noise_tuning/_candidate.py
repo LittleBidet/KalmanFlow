@@ -10,7 +10,7 @@ from ..kalman import kalman_filter
 from . import _diagnostics
 from ._preparation import _diagnostic_plan
 from ._types import (
-    BayesianEvaluationSettings,
+    NoiseEvaluationSettings,
     ValidationWindow,
     _DiagnosticPlan,
     _Pass,
@@ -25,7 +25,7 @@ def _evaluate_candidate(
     *,
     q_inflow: float,
     windows: Sequence[ValidationWindow],
-    settings: BayesianEvaluationSettings,
+    settings: NoiseEvaluationSettings,
     r_override: Array | None = None,
     q_storage_override: float | None = None,
     q_outflow_override: float | None = None,

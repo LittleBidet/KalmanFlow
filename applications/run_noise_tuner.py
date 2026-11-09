@@ -1,4 +1,4 @@
-"""Run the Bayesian five-parameter innovation tuner."""
+"""Run the five-parameter maximum-likelihood noise tuner."""
 
 from __future__ import annotations
 
@@ -25,13 +25,13 @@ from applications.preparation import (  # noqa: E402
     sources_for_reservoir,
 )
 from kalmanflow import (  # noqa: E402
-    BayesianEvaluationSettings,
-    BayesianTuningResult,
-    BayesianTuningSettings,
+    NoiseEvaluationSettings,
+    NoiseTuningResult,
+    NoiseTuningSettings,
     ReservoirConfig,
     UnitSystem,
     ValidationWindow,
-    tune_inflow_noise_bayesian,
+    tune_inflow_noise,
 )
 
 if TYPE_CHECKING:
@@ -43,10 +43,11 @@ DATA_START = pd.Timestamp("2022-10-01T00:00:00Z")
 DATA_END = pd.Timestamp("2023-02-01T00:00:00Z")
 ASOF_TOLERANCE = pd.Timedelta("20min")
 BASE_CONFIGURATION_VERSION = "reviewed-base-v1"
-PROPOSED_CONFIGURATION_VERSION = "2026-08-bayesian-noise-candidate"
+PROPOSED_CONFIGURATION_VERSION = "2026-11-ml-noise-candidate"
 INFLOW_INCREMENT_SD_SEEDS = (2.0, 5.0, 10.0, 20.0, 40.0)
-OUTPUT_DIRECTORY = Path("Outputs") / "bayesian_tuning"
+OUTPUT_DIRECTORY = Path("Outputs") / "noise_tuning"
 Q_STORAGE = 0.002
+Q_INFLOW = 1.0
 Q_OUTFLOW = 0.02
 R_STORAGE = 0.25
 R_OUTFLOW = 4.0
@@ -62,18 +63,23 @@ BOOTSTRAP_SAMPLES = 1000
 RANDOM_SEED = 20260820
 MAX_JITTER_FRACTION = 1e-9
 MAX_REGULARIZED_STEPS = 0
+# Six windows (about three weeks each for the default segment) give the
+# paired bootstrap enough blocks to compare the proposal with the base.
+VALIDATION_WINDOW_COUNT = 6
 
 
-def split_validation_windows(index: pd.DatetimeIndex) -> tuple[ValidationWindow, ...]:
+def split_validation_windows(
+    index: pd.DatetimeIndex, count: int = VALIDATION_WINDOW_COUNT
+) -> tuple[ValidationWindow, ...]:
     if not isinstance(index, pd.DatetimeIndex):
         raise TypeError("observations must use a pandas DatetimeIndex")
-    if len(index) < 3:
-        raise ValueError("at least three observations are required for three windows")
+    if len(index) < count:
+        raise ValueError(f"at least {count} observations are required for the windows")
     if index.tz is None:
         raise ValueError("observation timestamps must be timezone-aware")
     if not index.is_monotonic_increasing or index.has_duplicates:
         raise ValueError("observation timestamps must be increasing and unique")
-    positions = np.array_split(np.arange(len(index)), 3)
+    positions = np.array_split(np.arange(len(index)), count)
     windows: list[ValidationWindow] = []
     for number, rows in enumerate(positions, start=1):
         first, last = int(rows[0]), int(rows[-1])
@@ -93,7 +99,7 @@ def build_base_config(reservoir: str) -> ReservoirConfig:
     return ReservoirConfig(
         reservoir_id=name.casefold(),
         reservoir_name=name,
-        q=np.diag([Q_STORAGE, 1.0, Q_OUTFLOW]),
+        q=np.diag([Q_STORAGE, Q_INFLOW, Q_OUTFLOW]),
         r=np.diag([R_STORAGE, R_OUTFLOW]),
         p0=np.diag([P0_STORAGE, P0_INFLOW, P0_OUTFLOW]),
         smoothing_lag=SMOOTHING_LAG,
@@ -107,8 +113,8 @@ def build_base_config(reservoir: str) -> ReservoirConfig:
     )
 
 
-def build_evaluation_settings() -> BayesianEvaluationSettings:
-    return BayesianEvaluationSettings(
+def build_evaluation_settings() -> NoiseEvaluationSettings:
+    return NoiseEvaluationSettings(
         warmup=WARMUP,
         innovation_max_lag=INNOVATION_MAX_LAG,
         min_scored_storage_observations=MIN_SCORED_STORAGE_OBSERVATIONS,
@@ -123,7 +129,7 @@ def build_evaluation_settings() -> BayesianEvaluationSettings:
 def _validate_window_capacity(
     observations: pd.DataFrame,
     windows: Sequence[ValidationWindow],
-    settings: BayesianEvaluationSettings,
+    settings: NoiseEvaluationSettings,
 ) -> None:
     index = observations.index
     storage = observations["storage"].to_numpy(dtype=float, copy=False)
@@ -149,7 +155,7 @@ def _validate_window_capacity(
     ]
     if insufficient:
         raise ValueError(
-            "the three validation windows cannot meet Bayesian requirements "
+            "the validation windows cannot meet the scoring requirements "
             + "; ".join(insufficient)
         )
 
@@ -164,19 +170,17 @@ def _timestamp(value: object, label: str) -> pd.Timestamp:
     return timestamp.tz_convert("UTC")
 
 
-def build_bayesian_settings() -> BayesianTuningSettings:
-    """Return conservative defaults for the Bayesian search."""
+def build_tuning_settings() -> NoiseTuningSettings:
+    """Return the reviewed search bounds and budget."""
 
-    return BayesianTuningSettings(
-        total_trials=40,
-        initial_trials=12,
-        random_seed=RANDOM_SEED,
+    return NoiseTuningSettings(
         q_storage_multiplier_bounds=(0.5, 1.0),
+        q_inflow_multiplier_bounds=(0.001, 10.0),
         q_outflow_multiplier_bounds=(0.1, 10.0),
         r_storage_multiplier_bounds=(0.5, 1.0),
-        r_outflow_multiplier_bounds=(0.25, 4.0),
-        one_standard_error_weight=1.0,
-        max_abs_elapsed_lag_autocorrelation=0.25,
+        r_outflow_multiplier_bounds=(0.01, 4.0),
+        local_searches=2,
+        max_evaluations_per_search=200,
     )
 
 
@@ -242,8 +246,8 @@ def export_reservoir_config(config: ReservoirConfig, output_path: Path) -> Path:
     return _write_json(_config_payload(config), output_path)
 
 
-def export_bayesian_tuning_report(
-    result: BayesianTuningResult,
+def export_noise_tuning_report(
+    result: NoiseTuningResult,
     output_path: Path,
     *,
     configuration_path: Path | None = None,
@@ -266,14 +270,14 @@ def export_bayesian_tuning_report(
         "selection": {
             "selected_parameters": result.selected_parameters,
             "selected_objective": result.selected_objective,
-            "selection_threshold": result.selection_threshold,
-            "selection_reason": result.selection_reason,
-            "competitive_trial_ids": result.competitive_trial_ids,
+            "base_objective": result.base_objective,
+            "improvement_standard_error": result.improvement_standard_error,
         },
         "warnings": result.warnings,
         "timing_seconds": result.timing_seconds,
         "candidate_summary": _frame_records(result.candidate_summary),
         "window_diagnostics": _frame_records(result.window_diagnostics),
+        "identifiability": _frame_records(result.identifiability.reset_index()),
         "proxy_diagnostics": _frame_records(result.proxy_diagnostics),
     }
     if configuration_path is not None:
@@ -283,11 +287,15 @@ def export_bayesian_tuning_report(
     return _write_json(payload, output_path)
 
 
-def _print_result(result: BayesianTuningResult) -> None:
-    print("Selected Bayesian parameters:")
+def _print_result(result: NoiseTuningResult) -> None:
+    print("Selected noise parameters:")
     for name, value in result.selected_parameters.items():
         print(f"  {name}: {value}")
-    print(f"Selection reason: {result.selection_reason}")
+    print(
+        f"Objective: {result.selected_objective:.6g} "
+        f"(base {result.base_objective:.6g}, "
+        f"paired SE {result.improvement_standard_error:.3g})"
+    )
     print("Warnings:")
     if result.warnings:
         for warning in result.warnings:
@@ -298,9 +306,12 @@ def _print_result(result: BayesianTuningResult) -> None:
     print(result.candidate_summary.to_string(index=False))
     print("\nPer-window summary:")
     print(result.window_diagnostics.to_string(index=False))
+    if not result.identifiability.empty:
+        print("\nIdentifiability:")
+        print(result.identifiability.to_string())
 
 
-def run_bayesian_tuner(
+def run_noise_tuner(
     *,
     project_root: Path | None = None,
     reservoir: str | None = None,
@@ -308,8 +319,8 @@ def run_bayesian_tuner(
     data_end: object | None = None,
     output_path: Path | None = None,
     report_output_path: Path | None = None,
-) -> BayesianTuningResult:
-    """Prepare data, run Bayesian tuning, export artifacts, and return the result.
+) -> NoiseTuningResult:
+    """Prepare data, run noise tuning, export artifacts, and return the result.
 
     ``output_path`` receives the compact selected configuration. A detailed
     tuning report is written only when ``report_output_path`` is supplied.
@@ -348,8 +359,6 @@ def run_bayesian_tuner(
     observations = prepared.observations
     if observations.empty:
         raise ValueError("the requested segment produced no observations")
-    if len(observations) < 3:
-        raise ValueError("the requested segment needs at least three observations")
     windows = split_validation_windows(observations.index)
     settings = build_evaluation_settings()
     _validate_window_capacity(observations, windows, settings)
@@ -359,34 +368,34 @@ def run_bayesian_tuner(
         diagnostics = prepared.diagnostics
         if "upstream_flow" in diagnostics:
             upstream_proxy = diagnostics["upstream_flow"]
-    result = tune_inflow_noise_bayesian(
+    result = tune_inflow_noise(
         storage=observations["storage"],
         discharge=observations["outflow"],
         base_config=base_config,
         inflow_increment_sd_seeds=INFLOW_INCREMENT_SD_SEEDS,
         validation_windows=windows,
         settings=settings,
-        bayesian_settings=build_bayesian_settings(),
+        tuning_settings=build_tuning_settings(),
         upstream_proxy=upstream_proxy,
         proposed_configuration_version=PROPOSED_CONFIGURATION_VERSION,
     )
     exported_config_path = export_reservoir_config(result.selected_config, destination)
     exported_report_path = None
     if report_destination is not None:
-        exported_report_path = export_bayesian_tuning_report(
+        exported_report_path = export_noise_tuning_report(
             result,
             report_destination,
             configuration_path=exported_config_path,
         )
     _print_result(result)
-    print(f"\nBayesian tuning configuration exported to: {exported_config_path}")
+    print(f"\nNoise tuning configuration exported to: {exported_config_path}")
     if exported_report_path is not None:
-        print(f"Bayesian tuning report exported to: {exported_report_path}")
+        print(f"Noise tuning report exported to: {exported_report_path}")
     return result
 
 
 def main() -> None:
-    run_bayesian_tuner()
+    run_noise_tuner()
 
 
 if __name__ == "__main__":

@@ -56,14 +56,14 @@ absolute change is `NaN` when there are no valid adjacent pairs. The latter
 metric is interpreted as hourly because the validation frame is configured to
 the regular hourly cadence.
 
-## Bayesian calibration
+## Noise calibration
 
-The package-level `tune_inflow_noise_bayesian` workflow is separate from these
+The package-level `tune_inflow_noise` workflow is separate from these
 notebook comparison tables. It uses timezone-aware, non-overlapping operational
 windows and elapsed-time innovation diagnostics. Its primary score is causal
 joint predictive NLPD per observed component, using storage, outflow, or both
-when available. The report retains only compact trial and selected-window
-diagnostics.
+when available. The report retains only compact per-candidate and
+per-window diagnostics for the base and selected configurations.
 
 Keep a contiguous final test period out of calibration. After selection, call
 `evaluate_configuration` with the frozen proposed configuration and an

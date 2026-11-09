@@ -107,9 +107,9 @@ Select and review continuous-time process noise (`q`), observation noise (`r`),
 and initial covariance (`p0`) for each reservoir before operational use.
 Document the rationale and configuration version in the configuration metadata.
 
-## Bayesian causal evaluation
+## Causal noise evaluation
 
-`tune_inflow_noise_bayesian` is an offline calibration aid, not an adaptive
+`tune_inflow_noise` is an offline calibration aid, not an adaptive
 streaming mode. It uses the forward Kalman filter and never calls the RTS
 smoother. Initialization rows and the configured warm-up period are excluded
 from scores. Only rows inside the declared validation windows contribute to
@@ -120,6 +120,6 @@ an earlier score.
 
 Use `evaluate_configuration` once a proposed configuration is frozen for a
 separate, untouched test period. Test results must not be used to change the
-Bayesian search, windows, thresholds, or selected parameters. Filtered storage
+search, windows, thresholds, or selected parameters. Filtered storage
 closure is a reconstruction diagnostic; it is not an independent predictive
 score when the ending storage observation has already been assimilated.

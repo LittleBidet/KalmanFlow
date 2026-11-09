@@ -2,23 +2,25 @@ from __future__ import annotations
 
 import builtins
 import sys
+from collections.abc import Iterator
 from datetime import timedelta
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from kalmanflow import (
-    BayesianEvaluationSettings,
-    BayesianTuningError,
-    BayesianTuningSettings,
+    NoiseEvaluationSettings,
+    NoiseTuningError,
+    NoiseTuningSettings,
     ReservoirConfig,
     UnitSystem,
     ValidationWindow,
     evaluate_configuration,
-    tune_inflow_noise_bayesian,
+    tune_inflow_noise,
 )
-from kalmanflow.bayesian_tuning import _diagnostics, _optimization, _workflows
+from kalmanflow.noise_tuning import _optimization, _workflows
 
 
 def _config() -> ReservoirConfig:
@@ -60,74 +62,31 @@ def _windows(index: pd.DatetimeIndex, count: int = 3) -> tuple[ValidationWindow,
 
 
 def _tune_kwargs(
-    storage: pd.Series,
-    discharge: pd.Series,
-    windows: tuple[ValidationWindow, ...],
+    count: int = 30,
     *,
-    settings: BayesianEvaluationSettings | None = None,
-    search: BayesianTuningSettings | None = None,
+    window_count: int = 3,
+    search: NoiseTuningSettings | None = None,
 ) -> dict[str, object]:
+    storage, discharge = _inputs(count)
     return {
         "storage": storage,
         "discharge": discharge,
         "base_config": _config(),
         "inflow_increment_sd_seeds": [2.0, 5.0, 10.0],
-        "validation_windows": windows,
-        "settings": settings
-        or BayesianEvaluationSettings(
+        "validation_windows": _windows(storage.index, window_count),
+        "settings": NoiseEvaluationSettings(
             warmup=timedelta(0), min_scored_storage_observations=2
         ),
-        "bayesian_settings": search
-        or BayesianTuningSettings(
-            total_trials=3, initial_trials=3, acquisition_pool_size=128
-        ),
+        "tuning_settings": search or NoiseTuningSettings(max_evaluations_per_search=10),
         "proposed_configuration_version": "config-v2",
     }
 
 
-def test_workflow_calibration_and_validity_helpers_cover_threshold_edges() -> None:
-    search = BayesianTuningSettings(max_abs_elapsed_lag_autocorrelation=0.25)
-    no_thresholds = BayesianEvaluationSettings(
-        nis_warning_range=None,
-        innovation_bias_warning=None,
+def test_hard_validity_tolerates_malformed_window_rows() -> None:
+    candidate = SimpleNamespace(
+        reasons=["duplicate"],
+        window_rows={"one": {"storage_count": "bad", "joint_nlpd": "bad"}},
     )
-    violation, calibrated = _workflows._calibration_violation(
-        {"max_material_elapsed_lag_autocorrelation": 0.0},
-        no_thresholds,
-        search,
-    )
-    assert violation == 0.0
-    assert calibrated is True
-
-    values = {
-        "joint_nis": 0.1,
-        "storage_nis": 2.0,
-        "outflow_nis": np.nan,
-        "storage_bias": 1.0,
-        "outflow_bias": np.nan,
-        "conditional_storage_bias": -1.0,
-        "max_material_elapsed_lag_autocorrelation": 0.1,
-    }
-    violation, calibrated = _workflows._calibration_violation(
-        values,
-        BayesianEvaluationSettings(
-            nis_warning_range=(0.5, 1.5), innovation_bias_warning=0.25
-        ),
-        search,
-    )
-    assert violation > 0.0
-    assert calibrated is False
-
-    candidate = type(
-        "Candidate",
-        (),
-        {
-            "reasons": ["duplicate"],
-            "window_rows": {
-                "one": {"storage_count": "bad", "joint_nlpd": "bad"}
-            },
-        },
-    )()
     valid, reasons = _workflows._hard_validity(
         candidate,
         (
@@ -137,121 +96,103 @@ def test_workflow_calibration_and_validity_helpers_cover_threshold_edges() -> No
                 pd.Timestamp("2025-01-02", tz="UTC"),
             ),
         ),
-        BayesianEvaluationSettings(min_scored_storage_observations=2),
+        NoiseEvaluationSettings(min_scored_storage_observations=2),
     )
     assert valid is False
     assert reasons.count("duplicate") == 1
-
-    warnings = _workflows._calibration_warnings(
-        {}, BayesianEvaluationSettings()
-    )
-    assert any("unavailable" in warning for warning in warnings)
-    assert _workflows._calibration_warnings(
-        {
-            "joint_nis": 1.0,
-            "storage_nis": 1.0,
-            "outflow_nis": 1.0,
-            "storage_bias": 0.0,
-            "outflow_bias": 0.0,
-            "conditional_storage_bias": 0.0,
-        },
-        BayesianEvaluationSettings(),
-    ) == ()
-    bias_warnings = _workflows._calibration_warnings(
-        {
-            "joint_nis": 1.0,
-            "storage_nis": 1.0,
-            "outflow_nis": 1.0,
-            "storage_bias": 1.0,
-            "outflow_bias": 0.0,
-            "conditional_storage_bias": 0.0,
-        },
-        BayesianEvaluationSettings(),
-    )
-    assert any("storage_bias=" in warning for warning in bias_warnings)
+    assert any("scored storage observations" in reason for reason in reasons)
+    assert any("no finite joint NLPD" in reason for reason in reasons)
 
 
-def test_tuner_validates_public_arguments() -> None:
-    storage, discharge = _inputs()
-    windows = _windows(storage.index)
-    kwargs = _tune_kwargs(storage, discharge, windows)
-    with pytest.raises(TypeError, match="base_config"):
-        tune_inflow_noise_bayesian(**{**kwargs, "base_config": object()})  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="required"):
-        tune_inflow_noise_bayesian(
-            **{**kwargs, "proposed_configuration_version": None}
-        )  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="must be new"):
-        tune_inflow_noise_bayesian(
-            **{**kwargs, "proposed_configuration_version": "config-v1"}
-        )
-    with pytest.raises(BayesianTuningError, match="at least three"):
-        tune_inflow_noise_bayesian(
-            **{**kwargs, "validation_windows": windows[:2]}
-        )
-    with pytest.raises(TypeError, match="pandas Series"):
-        tune_inflow_noise_bayesian(**{**kwargs, "upstream_proxy": object()})  # type: ignore[arg-type]
+@pytest.mark.parametrize(
+    ("override", "error", "message"),
+    [
+        ({"base_config": object()}, TypeError, "base_config"),
+        ({"proposed_configuration_version": None}, ValueError, "required"),
+        ({"proposed_configuration_version": "  "}, ValueError, "required"),
+        ({"proposed_configuration_version": "config-v1"}, ValueError, "must be new"),
+        ({"upstream_proxy": object()}, TypeError, "pandas Series"),
+    ],
+)
+def test_tuner_validates_public_arguments(
+    override: dict[str, object], error: type[Exception], message: str
+) -> None:
+    with pytest.raises(error, match=message):
+        tune_inflow_noise(**{**_tune_kwargs(), **override})  # type: ignore[arg-type]
 
 
-def test_tuner_random_fallback_handles_duplicate_acquisition(
+def test_tuner_requires_three_validation_windows() -> None:
+    kwargs = _tune_kwargs()
+    windows = kwargs["validation_windows"]
+    with pytest.raises(NoiseTuningError, match="at least three"):
+        tune_inflow_noise(**{**kwargs, "validation_windows": windows[:2]})  # type: ignore[arg-type,index]
+
+
+def test_tuner_warns_when_selected_search_did_not_converge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    storage, discharge = _inputs()
-    windows = _windows(storage.index)
-    search = BayesianTuningSettings(
-        total_trials=4,
-        initial_trials=3,
-        acquisition_pool_size=128,
-        random_seed=9,
+    def stalled_search(
+        objective: object, start: np.ndarray, max_evaluations: int
+    ) -> _optimization._SearchOutcome:
+        return _optimization._SearchOutcome(start, 1, False, "budget exhausted")
+
+    monkeypatch.setattr(_optimization, "_local_search", stalled_search)
+    result = tune_inflow_noise(**_tune_kwargs())  # type: ignore[arg-type]
+    assert any("did not converge: budget exhausted" in w for w in result.warnings)
+
+
+def test_tuner_warns_when_selection_sits_on_a_search_bound() -> None:
+    search = NoiseTuningSettings(
+        r_outflow_multiplier_bounds=(10.0, 20.0), max_evaluations_per_search=10
     )
-    def duplicate_acquire(*args: object, **kwargs: object) -> tuple[np.ndarray, str]:
-        observed = args[2]
-        return np.asarray(observed[0], dtype=float), "expected-improvement"  # type: ignore[index]
-
-    monkeypatch.setattr(_optimization, "_fit_and_acquire", duplicate_acquire)
-    result = tune_inflow_noise_bayesian(
-        **_tune_kwargs(storage, discharge, windows, search=search)
-    )
-    assert "random-fallback" in set(result.candidate_summary["acquisition_source"])
+    result = tune_inflow_noise(**_tune_kwargs(search=search))  # type: ignore[arg-type]
+    selected = result.candidate_summary.query("selected").iloc[0]
+    assert "r_outflow" in selected["at_bounds"]
+    assert any("edge of the search bounds" in w for w in result.warnings)
+    assert "r_outflow" not in result.identifiability.index
 
 
-def test_tuner_uses_best_trial_when_competitive_set_is_empty(
+def test_identifiability_is_skipped_when_every_term_is_at_a_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    storage, discharge = _inputs()
-    windows = _windows(storage.index)
-    monkeypatch.setattr(_diagnostics, "_paired_standard_error", lambda *args: np.nan)
-    result = tune_inflow_noise_bayesian(
-        **_tune_kwargs(storage, discharge, windows)
-    )
-    assert len(result.competitive_trial_ids) == 1
-    assert bool(result.candidate_summary["selected"].sum())
+    def search_to_corner(
+        objective: object, start: np.ndarray, max_evaluations: int
+    ) -> _optimization._SearchOutcome:
+        return _optimization._SearchOutcome(np.ones(5), 1, True, "corner")
+
+    monkeypatch.setattr(_optimization, "_local_search", search_to_corner)
+    result = tune_inflow_noise(**_tune_kwargs())  # type: ignore[arg-type]
+    assert result.identifiability.empty
+    assert not any("identified" in warning for warning in result.warnings)
 
 
-def test_tuner_reports_calibrated_selection_with_five_windows() -> None:
-    storage, discharge = _inputs(32)
-    windows = _windows(storage.index, count=5)
-    settings = BayesianEvaluationSettings(
-        warmup=timedelta(0),
-        min_scored_storage_observations=2,
-        nis_warning_range=(0.0, 1e9),
-        innovation_bias_warning=None,
-    )
-    search = BayesianTuningSettings(
-        total_trials=3,
-        initial_trials=3,
-        acquisition_pool_size=128,
-        max_abs_elapsed_lag_autocorrelation=1e9,
-    )
-    result = tune_inflow_noise_bayesian(
-        **_tune_kwargs(storage, discharge, windows, settings=settings, search=search)
-    )
-    assert len(windows) == 5
+def test_five_windows_drop_the_weak_uncertainty_warning() -> None:
+    result = tune_inflow_noise(**_tune_kwargs(32, window_count=5))  # type: ignore[arg-type]
     assert not any("fewer than five" in warning for warning in result.warnings)
-    selected = result.candidate_summary.loc[
-        result.candidate_summary["selected"]
-    ].iloc[0]
-    assert bool(selected["calibrated"])
+
+
+def test_improvement_warnings_cover_unknown_unclear_and_clear_gains() -> None:
+    settings = NoiseEvaluationSettings(practical_equivalence_tolerance=0.05)
+    warn = _workflows._improvement_warnings
+    assert "unknown" in warn(np.nan, np.nan, settings)[0]
+    assert "not clearly better" in warn(0.04, 0.01, settings)[0]
+    assert "not clearly better" in warn(0.5, 1.0, settings)[0]
+    assert warn(0.5, 0.1, settings) == []
+
+
+def test_improvement_is_unknown_when_base_cannot_be_scored() -> None:
+    objective = SimpleNamespace(
+        window_losses=lambda result: result, weights=np.array([0.5, 0.5])
+    )
+    base = SimpleNamespace(result=np.array([np.nan, 1.0]))
+    selected = SimpleNamespace(result=np.array([1.0, 1.0]))
+    improvement, error = _workflows._improvement_over_base(
+        objective,  # type: ignore[arg-type]
+        base,  # type: ignore[arg-type]
+        selected,  # type: ignore[arg-type]
+    )
+    assert np.isnan(improvement)
+    assert np.isnan(error)
 
 
 def test_frozen_evaluation_rejects_invalid_configuration_type() -> None:
@@ -260,75 +201,42 @@ def test_frozen_evaluation_rejects_invalid_configuration_type() -> None:
         evaluate_configuration(storage, discharge, object())  # type: ignore[arg-type]
 
 
-def test_tuner_explains_missing_optional_optimizer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import kalmanflow.bayesian_tuning as package
+@pytest.fixture
+def unloaded_optimizer() -> Iterator[None]:
+    """Force the next tuning call to import the optimizer module afresh."""
 
-    module_name = "kalmanflow.bayesian_tuning._optimization"
-    saved_module = sys.modules.pop(module_name, None)
-    saved_attribute = getattr(package, "_optimization", None)
-    if hasattr(package, "_optimization"):
-        delattr(package, "_optimization")
+    import kalmanflow.noise_tuning as package
+
+    module_name = "kalmanflow.noise_tuning._optimization"
+    saved_module = sys.modules.pop(module_name)
+    saved_attribute = package.__dict__.pop("_optimization")
+    yield
+    sys.modules[module_name] = saved_module
+    package._optimization = saved_attribute  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("missing_name", "expected", "message"),
+    [
+        ("scipy", ImportError, "kalmanflow\\[tuning\\]"),
+        ("unrelated", ModuleNotFoundError, "synthetic failure"),
+    ],
+)
+@pytest.mark.usefixtures("unloaded_optimizer")
+def test_optimizer_import_failures_are_explained_or_propagated(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_name: str,
+    expected: type[Exception],
+    message: str,
+) -> None:
     original_import = builtins.__import__
 
-    def missing_scipy(
-        name: str,
-        globals: object | None = None,
-        locals: object | None = None,
-        fromlist: tuple[str, ...] = (),
-        level: int = 0,
-    ) -> object:
-        if name == "scipy" or name.startswith("scipy."):
-            raise ModuleNotFoundError("No module named 'scipy'", name="scipy")
-        return original_import(name, globals, locals, fromlist, level)
+    def failing_import(name: str, *args: object, **kwargs: object) -> object:
+        if name.split(".")[0] == "scipy":
+            raise ModuleNotFoundError("synthetic failure", name=missing_name)
+        return original_import(name, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "__import__", missing_scipy)
-    storage, discharge = _inputs()
-    windows = _windows(storage.index)
-    try:
-        with pytest.raises(ImportError, match="optional dependencies"):
-            tune_inflow_noise_bayesian(**_tune_kwargs(storage, discharge, windows))
-    finally:
-        monkeypatch.setattr(builtins, "__import__", original_import)
-        if saved_module is not None:
-            sys.modules[module_name] = saved_module
-        if saved_attribute is not None:
-            package._optimization = saved_attribute
-
-
-def test_tuner_propagates_unrelated_optimizer_import_errors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import kalmanflow.bayesian_tuning as package
-
-    module_name = "kalmanflow.bayesian_tuning._optimization"
-    saved_module = sys.modules.pop(module_name, None)
-    saved_attribute = getattr(package, "_optimization", None)
-    if hasattr(package, "_optimization"):
-        delattr(package, "_optimization")
-    original_import = builtins.__import__
-
-    def unrelated_failure(
-        name: str,
-        globals: object | None = None,
-        locals: object | None = None,
-        fromlist: tuple[str, ...] = (),
-        level: int = 0,
-    ) -> object:
-        if name.startswith("scipy."):
-            raise ModuleNotFoundError("synthetic unrelated failure", name="unrelated")
-        return original_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setattr(builtins, "__import__", unrelated_failure)
-    storage, discharge = _inputs()
-    windows = _windows(storage.index)
-    try:
-        with pytest.raises(ModuleNotFoundError, match="unrelated"):
-            tune_inflow_noise_bayesian(**_tune_kwargs(storage, discharge, windows))
-    finally:
-        monkeypatch.setattr(builtins, "__import__", original_import)
-        if saved_module is not None:
-            sys.modules[module_name] = saved_module
-        if saved_attribute is not None:
-            package._optimization = saved_attribute
+    kwargs = _tune_kwargs()
+    monkeypatch.setattr(builtins, "__import__", failing_import)
+    with pytest.raises(expected, match=message):
+        tune_inflow_noise(**kwargs)  # type: ignore[arg-type]
