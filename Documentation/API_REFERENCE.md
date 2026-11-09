@@ -111,7 +111,7 @@ SciPy loads only when a search is invoked.
 | `NoiseEvaluationSettings` | Shared warmup, innovation, calibration-warning, and numerical-stability settings. |
 | `NoiseTuningSettings` | Covariance multiplier bounds, local-search budget, identifiability check, and optional upstream-proxy thresholds. |
 | `tune_inflow_noise(...)` | Proposes five diagonal `q`/`r` terms by maximizing the causal innovation likelihood. It needs at least three windows and a new proposed configuration version. An optional `progress` callback receives updates during the run. |
-| `estimate_storage_noise(storage, validation_windows=None)` | Estimates storage reading noise (`r_storage`) per window and pooled, from the lag-1 autocovariance of storage changes. Use it to spot periods with different noise before tuning. |
+| `estimate_storage_noise(storage, validation_windows=None)` | Estimates storage reading noise (`r_storage`) per window and pooled, as the median of weekly lag-1 autocovariance estimates of storage changes. Use it to spot periods with different noise before tuning. |
 | `NoiseTuningProgress` | One progress update: phase and its number out of the phase count, filtering passes in that phase and their limit, best objective so far, and elapsed seconds. |
 | `NoiseTuningResult` | Proposed `selected_config` and parameters, objective versus the base configuration, per-candidate and per-window diagnostics, identifiability, the storage-noise estimates, optional proxy diagnostics, warnings, and timing. |
 | `evaluate_configuration(...)` | Scores one already-frozen configuration without searching or modifying it. |

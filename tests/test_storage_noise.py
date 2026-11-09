@@ -45,8 +45,44 @@ def test_estimate_recovers_known_reading_noise_per_window_and_pooled() -> None:
     assert frame["window"].tolist() == ["first", "second", "all"]
     np.testing.assert_allclose(frame["r_storage"], 4.0, rtol=0.15)
     np.testing.assert_allclose(frame["reading_sd"], 2.0, rtol=0.08)
-    assert frame.set_index("window").loc["all", "pairs"] == len(storage) - 2
+    pooled = frame.set_index("window").loc["all"]
+    assert pooled["pairs"] == len(storage) - 2
+    assert pooled["blocks"] == 2  # 12.5 days of readings span two weeks
     assert (frame["unchanged_share"] == 0.0).all()
+
+
+def _stormy_storage() -> tuple[pd.Series, tuple[ValidationWindow, ValidationWindow]]:
+    """Four calm weeks after four weeks that include a two-day storm."""
+
+    count = 2 * 28 * 96
+    index = pd.date_range("2025-01-01", periods=count, freq="15min", tz="UTC")
+    rng = np.random.default_rng(5)
+    true_changes = np.zeros(count)
+    storm = np.zeros(2 * 96)
+    for step in range(1, len(storm)):
+        storm[step] = 0.98 * storm[step - 1] + rng.normal(0.0, 3.0)
+    true_changes[5 * 96 : 7 * 96] = storm
+    storage = pd.Series(
+        1000.0 + np.cumsum(true_changes) + rng.normal(0.0, 2.0, count), index=index
+    )
+    middle = index[count // 2]
+    windows = (
+        ValidationWindow("stormy", index[0], middle),
+        ValidationWindow("calm", middle, index[-1] + pd.Timedelta(minutes=15)),
+    )
+    return storage, windows
+
+
+def test_block_median_is_not_dragged_to_zero_by_a_storm() -> None:
+    storage, windows = _stormy_storage()
+    stormy = np.diff(storage.to_numpy()[: len(storage) // 2])
+    # One covariance over the whole window is swamped by the storm...
+    assert _storage_noise._negative_lag1_covariance(stormy[1:], stormy[:-1]) < 0.0
+
+    # ...but the median of weekly estimates still finds the true noise of 4.
+    frame = estimate_storage_noise(storage, windows)
+    np.testing.assert_allclose(frame["r_storage"], 4.0, rtol=0.15)
+    assert _storage_noise._storage_noise_warnings(frame) == []
 
 
 def test_estimate_without_windows_returns_only_the_pooled_row() -> None:
@@ -68,6 +104,15 @@ def test_estimate_needs_enough_evenly_spaced_pairs() -> None:
     steps = np.cumsum(np.tile([15, 30], 200))
     storage.index = storage.index[0] + pd.to_timedelta(steps, unit="min")
     assert estimate_storage_noise(storage).loc[0, "pairs"] == 0
+
+
+def test_daily_readings_have_too_few_pairs_in_each_week() -> None:
+    daily = _noisy_storage(count=200)
+    daily.index = pd.date_range("2025-01-01", periods=200, freq="D", tz="UTC")
+    frame = estimate_storage_noise(daily)
+    assert frame.loc[0, "pairs"] == 198
+    assert frame.loc[0, "blocks"] == 0
+    assert np.isnan(frame.loc[0, "r_storage"])
 
 
 def test_smooth_storage_without_noise_estimates_zero() -> None:
@@ -96,22 +141,41 @@ def test_disagreeing_windows_point_to_the_public_estimator() -> None:
     assert "kalmanflow.estimate_storage_noise(storage, validation_windows)" in (
         warnings[0]
     )
-    # A zero estimate disagrees with any positive one.
-    assert _storage_noise._storage_noise_warnings(_frame(0.0, 2.0))
+
+
+def test_zero_windows_are_named_but_not_compared() -> None:
+    warnings = _storage_noise._storage_noise_warnings(_frame(0.0, 2.0, 2.5))
+    assert len(warnings) == 1
+    assert warnings[0].startswith("window-0 gave no reading-noise estimate")
+    assert "not compared" in warnings[0]
+
+
+def test_noiseless_window_is_named_rather_than_silently_dropped() -> None:
+    noisy = _noisy_storage(count=1400)
+    quiet = _noisy_storage(count=1400, noise_variance=0.0)
+    storage = pd.concat([noisy, quiet.set_axis(noisy.index + pd.Timedelta(days=15))])
+    windows = _halves(storage.index)
+    frame = estimate_storage_noise(storage, windows)
+    assert frame.set_index("window").loc["second", "r_storage"] == 0.0
+    warnings = _storage_noise._storage_noise_warnings(frame)
+    assert any(warning.startswith("second gave no") for warning in warnings)
+    assert not any("differs between validation windows" in w for w in warnings)
 
 
 def test_similar_or_sparse_windows_do_not_warn() -> None:
     warn = _storage_noise._storage_noise_warnings
     assert warn(_frame(4.0, 3.0, 5.0)) == []
-    assert warn(_frame(0.0, 0.0)) == []
     assert warn(_frame(4.0, np.nan)) == []
     assert warn(pd.DataFrame()) == []
 
 
-def test_unusable_pooled_estimate_warns_about_the_fallback() -> None:
-    for pooled in (np.nan, 0.0):
-        warnings = _storage_noise._storage_noise_warnings(_frame(pooled=pooled))
-        assert "could not be estimated" in warnings[0]
+def test_unusable_pooled_estimates_explain_why() -> None:
+    warn = _storage_noise._storage_noise_warnings
+    too_few = warn(_frame(pooled=np.nan))[0]
+    assert "fewer than 100 evenly spaced storage change pairs" in too_few
+    no_signal = warn(_frame(pooled=0.0))[0]
+    assert "no reading-noise signal" in no_signal
+    assert "storm-driven" in no_signal
 
 
 def _config(r_storage: float = 0.25) -> ReservoirConfig:

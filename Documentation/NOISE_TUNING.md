@@ -59,14 +59,18 @@ likelihood optimum may lie outside the box.
 Storage reading noise is measured from the data before the search. Reading
 errors make consecutive storage changes negatively correlated, so
 `r_storage` is estimated as minus the lag-1 autocovariance of storage
-changes over the scored rows. The search then keeps `r_storage` within a
-factor of `r_storage_estimate_factor` (default 2) of that estimate. When the
-data give no positive estimate (fewer than 100 evenly spaced change pairs,
-or no sign of reading noise), the base-relative `r_storage_multiplier_bounds`
-apply instead, with a warning. Set `estimate_r_storage=False` to always use
-those bounds. The per-window estimates are in the result's `storage_noise`
-table. If windows disagree by more than a factor of 4, which often points to
-a gauge or processing change, a warning suggests comparing periods with
+changes. Storm-driven changes are persistent and can hide that signal, so
+the estimate is taken in one-week blocks over the scored rows and the median
+across weeks is used. The search then keeps `r_storage` within a factor of
+`r_storage_estimate_factor` (default 2) of that estimate. When the data give
+no positive estimate (fewer than 100 evenly spaced change pairs, or no
+reading-noise signal), the base-relative `r_storage_multiplier_bounds` apply
+instead, with a warning that says which. Set `estimate_r_storage=False` to
+always use those bounds. The per-window estimates are in the result's
+`storage_noise` table. A window that gives no estimate is named in a warning
+and left out of the comparison. If the remaining windows disagree by more
+than a factor of 4, which often points to a gauge or processing change, a
+warning suggests comparing periods with
 `estimate_storage_noise(storage, validation_windows)` and tuning them
 separately. That function needs no SciPy and can be run before choosing
 windows.
