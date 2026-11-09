@@ -26,6 +26,39 @@ hourly inflow increment standard deviation) and at least three uniquely named,
 non-overlapping, half-open `ValidationWindow` intervals. Five or more windows
 are recommended; with fewer, the result carries a weak-uncertainty warning.
 
+## Choosing a tuning period
+
+The tuner fits one set of constant noise terms, so tune on a period where
+the gauge and its processing did not change. Before tuning, scan the record
+month by month:
+
+```python
+import pandas as pd
+from kalmanflow import ValidationWindow, estimate_storage_noise
+
+months = pd.date_range(storage.index[0].floor("D"), storage.index[-1], freq="MS")
+scan = estimate_storage_noise(
+    storage,
+    [ValidationWindow(f"{m:%Y-%m}", m, m + pd.offsets.MonthBegin(1)) for m in months],
+)
+```
+
+* **Stable:** a run of months whose `r_storage` values stay within about a
+  factor of 4 of each other, with a similar `unchanged_share`.
+* **Regime change:** a lasting step in `r_storage`, usually together with a
+  change in how storage is recorded (value precision, step size, or the
+  approval and grade codes in the source export). Tune each regime
+  separately, and apply each configuration only to data from its own regime.
+* **A single zero month** in a wet season is usually storm-dominated rather
+  than a gauge change. Only a run of zeros or a lasting shift is evidence of
+  a new regime.
+* **Cover the conditions you will estimate.** A configuration tuned on a
+  dry period can respond slowly to storms in real time, so include storm
+  events if causal storm response matters.
+
+Keep a final test period out of the tuning period and check the frozen
+proposal on it with `evaluate_configuration`.
+
 ## Objective and search
 
 The objective is the validation-window-weighted causal joint predictive
