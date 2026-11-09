@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -26,6 +27,7 @@ from applications.preparation import (  # noqa: E402
 )
 from kalmanflow import (  # noqa: E402
     NoiseEvaluationSettings,
+    NoiseTuningProgress,
     NoiseTuningResult,
     NoiseTuningSettings,
     ReservoirConfig,
@@ -36,6 +38,7 @@ from kalmanflow import (  # noqa: E402
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from typing import TextIO
 
 
 RESERVOIR = "Chesbro"
@@ -311,6 +314,105 @@ def _print_result(result: NoiseTuningResult) -> None:
         print(result.identifiability.to_string())
 
 
+class _ProgressPrinter:
+    """Draw tuning progress bars on ``stream`` (stderr by default).
+
+    In a terminal two bars update in place: the whole run, and the current
+    phase. Each finished phase stays above them as a completed bar. A phase
+    bar fills against its evaluation limit; local searches usually converge
+    well before it, so a finished phase is redrawn as complete and the total
+    bar advances in steps. Elsewhere, for example when output is redirected
+    to a log file, a line is written at each phase start and every
+    ``LOG_EVERY`` evaluations so the file fills in during the run.
+    """
+
+    LOG_EVERY = 10
+    BAR_WIDTH = 30
+    _CLEAR_LINE = "\x1b[K"
+    _UP_ONE_LINE = "\x1b[1A"
+
+    def __init__(self, stream: TextIO | None = None) -> None:
+        self._stream = sys.stderr if stream is None else stream
+        self._interactive = self._stream.isatty()
+        self._fill, self._empty = _bar_characters(self._stream)
+        self._last: NoiseTuningProgress | None = None
+
+    def __call__(self, update: NoiseTuningProgress) -> None:
+        new_phase = self._last is None or update.phase != self._last.phase
+        if self._interactive:
+            if self._last is not None:
+                # Return to the start of the total line, one line up.
+                self._stream.write(self._UP_ONE_LINE + "\r")
+                if new_phase:
+                    self._write_line(self._phase_line(_completed(self._last)))
+            self._write_line(self._total_line(update, _total_fraction(update)))
+            self._stream.write(self._phase_line(update) + self._CLEAR_LINE)
+        elif new_phase or update.evaluations % self.LOG_EVERY == 0:
+            total = f"{_total_fraction(update):.0%}"
+            self._stream.write(f"{self._phase_line(update)}  total {total}\n")
+        self._last = update
+        self._stream.flush()
+
+    def close(self) -> None:
+        """Complete both bars so later output starts on a clean line."""
+
+        if self._interactive and self._last is not None:
+            self._stream.write(self._UP_ONE_LINE + "\r")
+            self._write_line(self._phase_line(_completed(self._last)))
+            self._write_line(self._total_line(self._last, 1.0, status="done"))
+            self._stream.flush()
+        self._last = None
+
+    def _write_line(self, text: str) -> None:
+        self._stream.write(text + self._CLEAR_LINE + "\n")
+
+    def _bar(self, fraction: float) -> str:
+        filled = round(fraction * self.BAR_WIDTH)
+        return self._fill * filled + self._empty * (self.BAR_WIDTH - filled)
+
+    def _phase_line(self, update: NoiseTuningProgress) -> str:
+        minutes, seconds = divmod(int(update.elapsed_seconds), 60)
+        hours, minutes = divmod(minutes, 60)
+        return (
+            f"{update.phase:<15} |{self._bar(_phase_fraction(update))}| "
+            f"{update.evaluations:>3}/{update.evaluation_limit:<3}  "
+            f"best {update.best_objective:<9.6g} {hours}:{minutes:02d}:{seconds:02d}"
+        )
+
+    def _total_line(
+        self, update: NoiseTuningProgress, fraction: float, status: str | None = None
+    ) -> str:
+        # A skipped identifiability check ends the run before the last phase.
+        status = status or f"phase {update.phase_number}/{update.phase_count}"
+        return f"{'total':<15} |{self._bar(fraction)}| {fraction:>4.0%}  {status}"
+
+
+def _phase_fraction(update: NoiseTuningProgress) -> float:
+    if update.evaluations >= update.evaluation_limit:
+        return 1.0
+    return update.evaluations / update.evaluation_limit
+
+
+def _total_fraction(update: NoiseTuningProgress) -> float:
+    """Finished phases plus the current phase's share, over all phases."""
+
+    return (update.phase_number - 1 + _phase_fraction(update)) / update.phase_count
+
+
+def _completed(update: NoiseTuningProgress) -> NoiseTuningProgress:
+    return replace(update, evaluation_limit=update.evaluations)
+
+
+def _bar_characters(stream: TextIO) -> tuple[str, str]:
+    """Use block characters when the stream can encode them, else ASCII."""
+
+    try:
+        "█░".encode(getattr(stream, "encoding", None) or "utf-8")
+    except (LookupError, UnicodeEncodeError):
+        return "#", "-"
+    return "█", "░"
+
+
 def run_noise_tuner(
     *,
     project_root: Path | None = None,
@@ -368,17 +470,22 @@ def run_noise_tuner(
         diagnostics = prepared.diagnostics
         if "upstream_flow" in diagnostics:
             upstream_proxy = diagnostics["upstream_flow"]
-    result = tune_inflow_noise(
-        storage=observations["storage"],
-        discharge=observations["outflow"],
-        base_config=base_config,
-        inflow_increment_sd_seeds=INFLOW_INCREMENT_SD_SEEDS,
-        validation_windows=windows,
-        settings=settings,
-        tuning_settings=build_tuning_settings(),
-        upstream_proxy=upstream_proxy,
-        proposed_configuration_version=PROPOSED_CONFIGURATION_VERSION,
-    )
+    progress = _ProgressPrinter()
+    try:
+        result = tune_inflow_noise(
+            storage=observations["storage"],
+            discharge=observations["outflow"],
+            base_config=base_config,
+            inflow_increment_sd_seeds=INFLOW_INCREMENT_SD_SEEDS,
+            validation_windows=windows,
+            settings=settings,
+            tuning_settings=build_tuning_settings(),
+            upstream_proxy=upstream_proxy,
+            proposed_configuration_version=PROPOSED_CONFIGURATION_VERSION,
+            progress=progress,
+        )
+    finally:
+        progress.close()
     exported_config_path = export_reservoir_config(result.selected_config, destination)
     exported_report_path = None
     if report_destination is not None:

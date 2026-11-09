@@ -42,6 +42,12 @@ space, each with at most `max_evaluations_per_search` objective evaluations.
 The valid local optimum with the lowest objective is proposed. Results are
 deterministic.
 
+Pass `progress=callback` to follow a long run. The callback receives a
+`NoiseTuningProgress` at the start of each phase (`screening`, `search-1` and
+so on, then `identifiability`) and after every filtering pass; each phase's
+`evaluation_limit` is a bound, not an exact total, because searches often
+finish early. Exceptions raised by the callback propagate and cancel the run.
+
 Each search bound is a multiple of the matching base term
 (`*_multiplier_bounds` in `NoiseTuningSettings`), so the base `q_inflow`
 must be realistic, and every seed must fall inside the `q_inflow` bounds. By
@@ -117,7 +123,9 @@ prepares the checked-in Aquarius data, splits the requested segment into six
 validation windows, and writes the proposed `ReservoirConfig` JSON beneath
 `Outputs/noise_tuning` unless `output_path` is given. Pass
 `report_output_path` to also write the detailed audit report; the two paths
-must differ. Run it from the project root:
+must differ. Progress is written to stderr: in a terminal, a total bar and a
+bar for the current phase; when redirected to a file, a line every ten
+filtering passes. Run it from the project root:
 
 ```bash
 uv run --extra tuning python applications/run_noise_tuner.py

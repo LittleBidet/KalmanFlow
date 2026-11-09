@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from math import sqrt
 from time import perf_counter
@@ -17,6 +17,7 @@ from ._types import (
     ConfigEvaluationResult,
     NoiseEvaluationSettings,
     NoiseTuningError,
+    NoiseTuningProgress,
     NoiseTuningResult,
     NoiseTuningSettings,
     ValidationWindow,
@@ -96,6 +97,49 @@ def _hard_validity(
     return not unique_reasons, unique_reasons
 
 
+class _ProgressReporter:
+    """Send :class:`NoiseTuningProgress` updates to an optional callback."""
+
+    def __init__(
+        self,
+        callback: Callable[[NoiseTuningProgress], None] | None,
+        phase_count: int,
+    ) -> None:
+        self._callback = callback
+        self._phase_count = phase_count
+        self._started = perf_counter()
+        self._phase = ""
+        self._phase_number = 0
+        self._limit = 0
+        self._evaluations = 0
+        self._best = np.inf
+
+    def start_phase(self, phase: str, limit: int) -> None:
+        self._phase, self._limit, self._evaluations = phase, limit, 0
+        self._phase_number += 1
+        self._emit()
+
+    def evaluated(self, score: float) -> None:
+        self._evaluations += 1
+        self._best = min(self._best, score)
+        self._emit()
+
+    def _emit(self) -> None:
+        if self._callback is None:
+            return
+        self._callback(
+            NoiseTuningProgress(
+                phase=self._phase,
+                phase_number=self._phase_number,
+                phase_count=self._phase_count,
+                evaluations=self._evaluations,
+                evaluation_limit=self._limit,
+                best_objective=float(self._best),
+                elapsed_seconds=perf_counter() - self._started,
+            )
+        )
+
+
 class _Objective:
     """Weighted mean causal joint NLPD of a parameter set over the windows.
 
@@ -112,18 +156,20 @@ class _Objective:
         windows: Sequence[ValidationWindow],
         settings: NoiseEvaluationSettings,
         plan: _DiagnosticPlan,
+        progress: _ProgressReporter,
     ) -> None:
         self.prepared = prepared
         self.windows = tuple(windows)
         self.settings = settings
         self.plan = plan
         self.weights = _preparation._window_weights(windows)
+        self.progress = progress
         self._scores: dict[tuple[float, ...], float] = {}
 
     def evaluate(self, parameters: Mapping[str, float]) -> _Pass:
         """Run one causal filtering pass and keep its full diagnostics."""
 
-        return _candidate._evaluate_candidate(
+        result = _candidate._evaluate_candidate(
             self.prepared,
             q_inflow=parameters["q_inflow"],
             q_storage_override=parameters["q_storage"],
@@ -133,6 +179,8 @@ class _Objective:
             settings=self.settings,
             plan=self.plan,
         )
+        self.progress.evaluated(self.score(result))
+        return result
 
     def window_losses(self, candidate: _Pass) -> Array:
         return np.asarray(
@@ -197,6 +245,7 @@ def tune_inflow_noise(
     tuning_settings: NoiseTuningSettings | None = None,
     upstream_proxy: pd.Series | None = None,
     proposed_configuration_version: str | None = None,
+    progress: Callable[[NoiseTuningProgress], None] | None = None,
 ) -> NoiseTuningResult:
     """Fit diagonal ``Q`` and ``R`` by maximizing the causal innovation likelihood.
 
@@ -207,13 +256,17 @@ def tune_inflow_noise(
     Calibration, identifiability, and upstream-proxy checks are reported as
     warnings and never change the selection. Proposals require independent
     validation before operational use.
+
+    ``progress``, when given, receives a :class:`NoiseTuningProgress` update
+    at the start of each phase and after every filtering pass. Exceptions it
+    raises propagate, so raising one cancels the run.
     """
 
     optimizer = _load_optimizer()
     options = settings or NoiseEvaluationSettings()
     search = tuning_settings or NoiseTuningSettings()
     _validate_tuning_arguments(
-        base_config, proposed_configuration_version, upstream_proxy
+        base_config, proposed_configuration_version, upstream_proxy, progress
     )
     windows = _preparation._validate_windows(validation_windows)
     if len(windows) < 3:
@@ -222,7 +275,13 @@ def tune_inflow_noise(
     plan = _preparation._diagnostic_plan(prepared, windows, options)
     space = _ParameterSpace.from_settings(base_config, search)
     starts = space.starting_points(inflow_increment_sd_seeds)
-    objective = _Objective(prepared, windows, options, plan)
+    # Screening, one phase per local search, then the optional identifiability check.
+    phase_count = (
+        1 + min(search.local_searches, len(starts)) + int(search.check_identifiability)
+    )
+    objective = _Objective(
+        prepared, windows, options, plan, _ProgressReporter(progress, phase_count)
+    )
 
     started = perf_counter()
     candidates = _search(optimizer, objective, space, starts, search)
@@ -291,6 +350,7 @@ def _validate_tuning_arguments(
     base_config: object,
     proposed_configuration_version: object,
     upstream_proxy: object,
+    progress: object,
 ) -> None:
     if not isinstance(base_config, ReservoirConfig):
         raise TypeError("base_config must be a ReservoirConfig")
@@ -305,6 +365,8 @@ def _validate_tuning_arguments(
         raise ValueError("proposed_configuration_version must be new")
     if upstream_proxy is not None and not isinstance(upstream_proxy, pd.Series):
         raise TypeError("upstream_proxy must be a pandas Series or None")
+    if progress is not None and not callable(progress):
+        raise TypeError("progress must be callable or None")
 
 
 def _search(
@@ -319,9 +381,15 @@ def _search(
     def unit_objective(point: Array) -> float:
         return objective(space.decode(point))
 
+    # Screening scores every start, then the base configuration.
+    objective.progress.start_phase("screening", len(starts) + 1)
     ranked_starts = sorted(starts, key=unit_objective)
     candidates = [_Candidate("base", dict(space.base), objective.evaluate(space.base))]
     for number, start in enumerate(ranked_starts[: search.local_searches], start=1):
+        # The extra pass keeps the optimum's full diagnostics.
+        objective.progress.start_phase(
+            f"search-{number}", search.max_evaluations_per_search + 1
+        )
         outcome = optimizer._local_search(
             unit_objective, start, search.max_evaluations_per_search
         )
@@ -361,6 +429,8 @@ def _check_identifiability(
     free = [name for name in _PARAMETER_NAMES if name not in at_bounds]
     if not free:
         return pd.DataFrame(), []
+    # A central-difference Hessian over n terms needs 2n² points plus the center.
+    objective.progress.start_phase("identifiability", 2 * len(free) ** 2 + 1)
     hessian = _identifiability._log_space_hessian(objective, selected.parameters, free)
     return _identifiability._identifiability_report(
         hessian, free, objective.scored_components(selected.result)
@@ -620,6 +690,7 @@ __all__ = [
     "ConfigEvaluationResult",
     "NoiseEvaluationSettings",
     "NoiseTuningError",
+    "NoiseTuningProgress",
     "NoiseTuningResult",
     "NoiseTuningSettings",
     "ValidationWindow",

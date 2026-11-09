@@ -34,6 +34,7 @@ EXPECTED_EXPORTS = {
     "ConfigEvaluationResult",
     "NoiseEvaluationSettings",
     "NoiseTuningError",
+    "NoiseTuningProgress",
     "NoiseTuningResult",
     "NoiseTuningSettings",
     "ValidationWindow",

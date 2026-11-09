@@ -112,6 +112,7 @@ def test_hard_validity_tolerates_malformed_window_rows() -> None:
         ({"proposed_configuration_version": "  "}, ValueError, "required"),
         ({"proposed_configuration_version": "config-v1"}, ValueError, "must be new"),
         ({"upstream_proxy": object()}, TypeError, "pandas Series"),
+        ({"progress": 42}, TypeError, "progress must be callable"),
     ],
 )
 def test_tuner_validates_public_arguments(

@@ -11,6 +11,7 @@ from kalmanflow import (
     ConfigEvaluationResult,
     NoiseEvaluationSettings,
     NoiseTuningError,
+    NoiseTuningProgress,
     NoiseTuningResult,
     NoiseTuningSettings,
     ReservoirConfig,
@@ -85,6 +86,7 @@ def _tune(
     settings: NoiseEvaluationSettings | None = None,
     tuning_settings: NoiseTuningSettings | None = None,
     upstream_proxy: pd.Series | None = None,
+    progress: object = None,
 ) -> NoiseTuningResult:
     default_settings, default_tuning = _settings()
     return tune_inflow_noise(
@@ -97,6 +99,7 @@ def _tune(
         tuning_settings=tuning_settings or default_tuning,
         upstream_proxy=upstream_proxy,
         proposed_configuration_version="config-v2",
+        progress=progress,  # type: ignore[arg-type]
     )
 
 
@@ -962,3 +965,66 @@ def test_frozen_evaluation_rejects_submicrosecond_observation_index() -> None:
     discharge = pd.Series([4.0, 4.0], index=index)
     with pytest.raises(ValueError, match="finer than microsecond"):
         evaluate_configuration(storage, discharge, _config())
+
+
+def test_progress_reports_each_filter_pass_by_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage, discharge, windows = _inputs()
+    real_evaluate = _candidate._evaluate_candidate
+    passes = 0
+
+    def counting_evaluate(*args, **kwargs):
+        nonlocal passes
+        passes += 1
+        return real_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(_candidate, "_evaluate_candidate", counting_evaluate)
+    updates: list[NoiseTuningProgress] = []
+    _tune(storage, discharge, windows, progress=updates.append)
+
+    phases = list(dict.fromkeys(update.phase for update in updates))
+    assert phases == ["screening", "search-1", "search-2", "identifiability"]
+    numbers = list(dict.fromkeys(update.phase_number for update in updates))
+    assert numbers == [1, 2, 3, 4]
+    assert {update.phase_count for update in updates} == {4}
+    for phase in phases:
+        counts = [u.evaluations for u in updates if u.phase == phase]
+        assert counts == list(range(len(counts)))
+    screening = [u for u in updates if u.phase == "screening"]
+    assert screening[0].evaluation_limit == 3 + 1
+    assert screening[-1].evaluations == 3 + 1
+    # Every update after a phase start is one new filtering pass; cached
+    # objective calls never report.
+    assert sum(u.evaluations > 0 for u in updates) == passes
+    best = [u.best_objective for u in updates]
+    assert best == sorted(best, reverse=True)
+    elapsed = [u.elapsed_seconds for u in updates]
+    assert elapsed == sorted(elapsed)
+
+
+def test_progress_has_no_identifiability_phase_when_the_check_is_off() -> None:
+    storage, discharge, windows = _inputs()
+    updates: list[NoiseTuningProgress] = []
+    _tune(
+        storage,
+        discharge,
+        windows,
+        tuning_settings=NoiseTuningSettings(
+            max_evaluations_per_search=10, check_identifiability=False
+        ),
+        progress=updates.append,
+    )
+    assert "identifiability" not in {update.phase for update in updates}
+    assert {update.phase_count for update in updates} == {3}
+
+
+def test_progress_callback_exceptions_cancel_tuning() -> None:
+    storage, discharge, windows = _inputs()
+
+    def cancel(update: NoiseTuningProgress) -> None:
+        if update.phase == "search-1":
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _tune(storage, discharge, windows, progress=cancel)

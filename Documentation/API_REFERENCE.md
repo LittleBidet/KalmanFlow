@@ -110,7 +110,8 @@ SciPy loads only when a search is invoked.
 | `ValidationWindow(name, start, end, weight=None)` | Named, timezone-aware half-open interval `[start, end)` for causal scoring. Window boundaries may use nanosecond precision even though scored observation timestamps are limited to microseconds. |
 | `NoiseEvaluationSettings` | Shared warmup, innovation, calibration-warning, and numerical-stability settings. |
 | `NoiseTuningSettings` | Covariance multiplier bounds, local-search budget, identifiability check, and optional upstream-proxy thresholds. |
-| `tune_inflow_noise(...)` | Proposes five diagonal `q`/`r` terms by maximizing the causal innovation likelihood. It needs at least three windows and a new proposed configuration version. |
+| `tune_inflow_noise(...)` | Proposes five diagonal `q`/`r` terms by maximizing the causal innovation likelihood. It needs at least three windows and a new proposed configuration version. An optional `progress` callback receives updates during the run. |
+| `NoiseTuningProgress` | One progress update: phase and its number out of the phase count, filtering passes in that phase and their limit, best objective so far, and elapsed seconds. |
 | `NoiseTuningResult` | Proposed `selected_config` and parameters, objective versus the base configuration, per-candidate and per-window diagnostics, identifiability, optional proxy diagnostics, warnings, and timing. |
 | `evaluate_configuration(...)` | Scores one already-frozen configuration without searching or modifying it. |
 | `ConfigEvaluationResult` | Frozen configuration, compact candidate summary, window diagnostics, and warnings. |

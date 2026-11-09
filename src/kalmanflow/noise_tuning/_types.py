@@ -269,6 +269,29 @@ class NoiseTuningResult:
         )
 
 
+@dataclass(frozen=True)
+class NoiseTuningProgress:
+    """One progress update from :func:`tune_inflow_noise`.
+
+    An update is sent when a phase starts (``evaluations == 0``) and after
+    every new causal filtering pass. Phases run in order: ``"screening"``,
+    ``"search-1"`` to ``"search-k"``, then ``"identifiability"`` when that
+    check runs. ``evaluation_limit`` bounds the phase's passes; a search can
+    finish well below it, and SciPy may overrun it by one gradient step.
+    ``phase_number`` counts from 1 to ``phase_count``. The identifiability
+    phase is counted when the check is enabled but skipped when every term
+    ends on a search bound, so the run can finish one phase early.
+    """
+
+    phase: str
+    phase_number: int
+    phase_count: int
+    evaluations: int
+    evaluation_limit: int
+    best_objective: float
+    elapsed_seconds: float
+
+
 def _copy_frames(instance: object, names: tuple[str, ...]) -> None:
     for name in names:
         frame = getattr(instance, name)
