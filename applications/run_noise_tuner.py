@@ -281,6 +281,7 @@ def export_noise_tuning_report(
         "candidate_summary": _frame_records(result.candidate_summary),
         "window_diagnostics": _frame_records(result.window_diagnostics),
         "identifiability": _frame_records(result.identifiability.reset_index()),
+        "storage_noise": _frame_records(result.storage_noise),
         "proxy_diagnostics": _frame_records(result.proxy_diagnostics),
     }
     if configuration_path is not None:
@@ -312,6 +313,9 @@ def _print_result(result: NoiseTuningResult) -> None:
     if not result.identifiability.empty:
         print("\nIdentifiability:")
         print(result.identifiability.to_string())
+    if not result.storage_noise.empty:
+        print("\nStorage reading noise estimated from the data:")
+        print(result.storage_noise.to_string(index=False))
 
 
 class _ProgressPrinter:

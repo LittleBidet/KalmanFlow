@@ -51,11 +51,25 @@ finish early. Exceptions raised by the callback propagate and cancel the run.
 Each search bound is a multiple of the matching base term
 (`*_multiplier_bounds` in `NoiseTuningSettings`), so the base `q_inflow`
 must be realistic, and every seed must fall inside the `q_inflow` bounds. By
-default `q_storage` and `r_storage` cannot exceed their reviewed base values:
-the innovation likelihood alone cannot tell a rapid inflow event from an
-over-dispersed storage channel. Widen those bounds only with independent
-evidence. A selected term on a bound is reported, because the likelihood
-optimum may lie outside the box.
+default `q_storage` cannot exceed its reviewed base value: the innovation
+likelihood alone cannot tell a rapid inflow event from an over-dispersed
+storage channel. A selected term on a bound is reported, because the
+likelihood optimum may lie outside the box.
+
+Storage reading noise is measured from the data before the search. Reading
+errors make consecutive storage changes negatively correlated, so
+`r_storage` is estimated as minus the lag-1 autocovariance of storage
+changes over the scored rows. The search then keeps `r_storage` within a
+factor of `r_storage_estimate_factor` (default 2) of that estimate. When the
+data give no positive estimate (fewer than 100 evenly spaced change pairs,
+or no sign of reading noise), the base-relative `r_storage_multiplier_bounds`
+apply instead, with a warning. Set `estimate_r_storage=False` to always use
+those bounds. The per-window estimates are in the result's `storage_noise`
+table. If windows disagree by more than a factor of 4, which often points to
+a gauge or processing change, a warning suggests comparing periods with
+`estimate_storage_noise(storage, validation_windows)` and tuning them
+separately. That function needs no SciPy and can be run before choosing
+windows.
 
 ## Diagnostics and warnings
 

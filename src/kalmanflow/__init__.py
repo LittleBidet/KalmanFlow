@@ -31,6 +31,7 @@ from .noise_tuning import (
     NoiseTuningResult,
     NoiseTuningSettings,
     ValidationWindow,
+    estimate_storage_noise,
     evaluate_configuration,
     tune_inflow_noise,
 )
@@ -86,6 +87,7 @@ __all__ = [
     "NoiseTuningResult",
     "NoiseTuningSettings",
     "ValidationWindow",
+    "estimate_storage_noise",
     "evaluate_configuration",
     "tune_inflow_noise",
 ]

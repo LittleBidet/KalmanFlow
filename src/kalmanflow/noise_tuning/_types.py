@@ -149,6 +149,13 @@ class NoiseTuningSettings:
     base value by default: the innovation likelihood alone cannot tell a rapid
     inflow event from an over-dispersed storage channel. Callers with
     independent evidence may widen those bounds explicitly.
+
+    With ``estimate_r_storage`` (the default), ``r_storage`` is instead
+    searched between ``estimate / r_storage_estimate_factor`` and
+    ``estimate * r_storage_estimate_factor``, where ``estimate`` is the
+    storage reading noise measured from the data by
+    :func:`estimate_storage_noise`. If the data give no positive estimate,
+    ``r_storage_multiplier_bounds`` apply.
     """
 
     q_storage_multiplier_bounds: tuple[float, float] = (0.5, 1.0)
@@ -156,6 +163,8 @@ class NoiseTuningSettings:
     q_outflow_multiplier_bounds: tuple[float, float] = (0.1, 10.0)
     r_storage_multiplier_bounds: tuple[float, float] = (0.5, 1.0)
     r_outflow_multiplier_bounds: tuple[float, float] = (0.01, 4.0)
+    estimate_r_storage: bool = True
+    r_storage_estimate_factor: float = 2.0
     local_searches: int = 2
     max_evaluations_per_search: int = 200
     check_identifiability: bool = True
@@ -179,8 +188,13 @@ class NoiseTuningSettings:
         for name, minimum in integers.items():
             value = bounded_integer(getattr(self, name), name=name, minimum=minimum)
             object.__setattr__(self, name, value)
-        if not isinstance(self.check_identifiability, bool):
-            raise TypeError("check_identifiability must be a bool")
+        for name in ("check_identifiability", "estimate_r_storage"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be a bool")
+        factor = float(self.r_storage_estimate_factor)
+        if not np.isfinite(factor) or factor <= 1.0:
+            raise ValueError("r_storage_estimate_factor must be finite and above 1")
+        object.__setattr__(self, "r_storage_estimate_factor", factor)
         if (
             not isinstance(self.proxy_max_lag, timedelta)
             or self.proxy_max_lag < timedelta(0)
@@ -225,7 +239,9 @@ class NoiseTuningResult:
     local search. ``identifiability`` holds, for each selected term not held
     at a search bound, the curvature of the objective, an approximate standard
     error of the log value, and the correlations implied by the inverse
-    Hessian. It is empty when the check is disabled.
+    Hessian. It is empty when the check is disabled. ``storage_noise`` is the
+    per-window :func:`estimate_storage_noise` table over the scored rows; it
+    is empty when ``estimate_r_storage`` is off.
     """
 
     selected_config: ReservoirConfig
@@ -236,6 +252,7 @@ class NoiseTuningResult:
     candidate_summary: pd.DataFrame
     window_diagnostics: pd.DataFrame
     identifiability: pd.DataFrame = field(default_factory=pd.DataFrame)
+    storage_noise: pd.DataFrame = field(default_factory=pd.DataFrame)
     proxy_diagnostics: pd.DataFrame = field(default_factory=pd.DataFrame)
     warnings: tuple[str, ...] = ()
     timing_seconds: Mapping[str, float] = field(default_factory=dict)
@@ -247,6 +264,7 @@ class NoiseTuningResult:
                 "candidate_summary",
                 "window_diagnostics",
                 "identifiability",
+                "storage_noise",
                 "proxy_diagnostics",
             ),
         )

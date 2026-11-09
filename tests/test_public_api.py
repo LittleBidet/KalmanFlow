@@ -38,6 +38,7 @@ EXPECTED_EXPORTS = {
     "NoiseTuningResult",
     "NoiseTuningSettings",
     "ValidationWindow",
+    "estimate_storage_noise",
     "evaluate_configuration",
     "tune_inflow_noise",
 }

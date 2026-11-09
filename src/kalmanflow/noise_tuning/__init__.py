@@ -6,6 +6,7 @@ configuration evaluation requires only the base dependencies. The tuning API,
 selection rules, and result schema may change between releases.
 """
 
+from ._storage_noise import estimate_storage_noise
 from ._types import (
     ConfigEvaluationResult,
     NoiseEvaluationSettings,
@@ -25,6 +26,7 @@ __all__ = [
     "NoiseTuningResult",
     "NoiseTuningSettings",
     "ValidationWindow",
+    "estimate_storage_noise",
     "evaluate_configuration",
     "tune_inflow_noise",
 ]

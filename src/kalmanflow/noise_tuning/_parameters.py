@@ -29,15 +29,22 @@ class _ParameterSpace:
 
     Covariances are positive and scale-free, so the search works on their
     logarithms. Coordinate 0 is the lower bound and 1 the upper bound.
+    ``base`` is the reviewed configuration; ``start`` is where searches
+    begin, which differs from ``base`` only when ``r_storage`` is centered on
+    a data estimate.
     """
 
     base: Mapping[str, float]
+    start: Mapping[str, float]
     lows: Array
     highs: Array
 
     @classmethod
     def from_settings(
-        cls, base_config: ReservoirConfig, options: NoiseTuningSettings
+        cls,
+        base_config: ReservoirConfig,
+        options: NoiseTuningSettings,
+        r_storage_center: float | None = None,
     ) -> _ParameterSpace:
         base = _base_parameters(base_config)
         base_values = np.asarray(list(base.values()))
@@ -48,11 +55,16 @@ class _ParameterSpace:
         multipliers = np.asarray(
             [getattr(options, name) for name in options.multiplier_bounds_names()]
         )
-        return cls(
-            base=base,
-            lows=base_values * multipliers[:, 0],
-            highs=base_values * multipliers[:, 1],
-        )
+        lows = base_values * multipliers[:, 0]
+        highs = base_values * multipliers[:, 1]
+        start = dict(base)
+        if r_storage_center is not None:
+            axis = _PARAMETER_NAMES.index("r_storage")
+            factor = options.r_storage_estimate_factor
+            lows[axis] = r_storage_center / factor
+            highs[axis] = r_storage_center * factor
+            start["r_storage"] = r_storage_center
+        return cls(base=base, start=start, lows=lows, highs=highs)
 
     def encode(self, parameters: Mapping[str, float]) -> Array:
         values = np.asarray([parameters[name] for name in _PARAMETER_NAMES])
@@ -68,9 +80,9 @@ class _ParameterSpace:
     def starting_points(
         self, inflow_increment_sd_seeds: Sequence[float]
     ) -> list[Array]:
-        """Return one start per seed: base noise terms with the seed ``q_inflow``.
+        """Return one start per seed: start noise terms with the seed ``q_inflow``.
 
-        Base terms outside the box are moved to the nearest bound; a seed
+        Start terms outside the box are moved to the nearest bound; a seed
         outside the ``q_inflow`` bounds is an error rather than a silent clip.
         """
 
@@ -86,11 +98,11 @@ class _ParameterSpace:
                 "inflow increment seeds must lie inside q_inflow_multiplier_bounds "
                 f"(q_inflow between {low:.6g} and {high:.6g})"
             )
-        base_point = np.clip(self.encode(self.base), 0.0, 1.0)
+        start_point = np.clip(self.encode(self.start), 0.0, 1.0)
         starts = []
         for q_inflow in q_values:
-            point = base_point.copy()
-            point[1] = self.encode({**self.base, "q_inflow": q_inflow})[1]
+            point = start_point.copy()
+            point[1] = self.encode({**self.start, "q_inflow": q_inflow})[1]
             starts.append(point)
         return starts
 

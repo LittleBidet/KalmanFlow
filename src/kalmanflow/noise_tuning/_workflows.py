@@ -10,7 +10,14 @@ import numpy as np
 import pandas as pd
 
 from ..reservoir_config import ReservoirConfig
-from . import _candidate, _diagnostics, _identifiability, _preparation, _proxy
+from . import (
+    _candidate,
+    _diagnostics,
+    _identifiability,
+    _preparation,
+    _proxy,
+    _storage_noise,
+)
 from ._parameters import _ParameterSpace
 from ._types import (
     _PARAMETER_NAMES,
@@ -273,7 +280,23 @@ def tune_inflow_noise(
         raise NoiseTuningError("at least three validation windows are required")
     prepared = _preparation._prepare(storage, discharge, base_config)
     plan = _preparation._diagnostic_plan(prepared, windows, options)
-    space = _ParameterSpace.from_settings(base_config, search)
+    storage_noise = (
+        _storage_noise._storage_noise_frame(
+            prepared.timestamps, prepared.observations[:, 0], windows, plan.score_mask
+        )
+        if search.estimate_r_storage
+        else pd.DataFrame()
+    )
+    r_storage_estimate = _storage_noise._pooled_estimate(storage_noise)
+    space = _ParameterSpace.from_settings(
+        base_config,
+        search,
+        r_storage_center=(
+            r_storage_estimate
+            if np.isfinite(r_storage_estimate) and r_storage_estimate > 0.0
+            else None
+        ),
+    )
     starts = space.starting_points(inflow_increment_sd_seeds)
     # Screening, one phase per local search, then the optional identifiability check.
     phase_count = (
@@ -314,6 +337,7 @@ def tune_inflow_noise(
             )
         ),
         *identifiability_warnings,
+        *_storage_noise._storage_noise_warnings(storage_noise),
         *_proxy_warnings(proxy_frame),
     ]
     selected_objective = objective.score(selected.result)
@@ -328,6 +352,7 @@ def tune_inflow_noise(
                 "selected_objective": selected_objective,
                 "base_objective": base_objective,
                 "improvement_standard_error": improvement_error,
+                "r_storage_estimate": r_storage_estimate,
             },
         ),
         selected_parameters=selected.parameters,
@@ -337,6 +362,7 @@ def tune_inflow_noise(
         candidate_summary=summary,
         window_diagnostics=_window_frame((base, selected), windows),
         identifiability=identifiability,
+        storage_noise=storage_noise,
         proxy_diagnostics=proxy_frame,
         warnings=tuple(dict.fromkeys(warnings)),
         timing_seconds={

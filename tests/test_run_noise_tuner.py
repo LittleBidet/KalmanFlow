@@ -137,6 +137,7 @@ def test_runner_preserves_current_tuner_inputs_and_exports_two_artifacts(
             base_objective=0.5,
             improvement_standard_error=0.01,
             identifiability=pd.DataFrame(),
+            storage_noise=pd.DataFrame(),
             warnings=(),
             timing_seconds={"total_seconds": 0.1},
             candidate_summary=pd.DataFrame(
@@ -196,6 +197,7 @@ def test_runner_preserves_current_tuner_inputs_and_exports_two_artifacts(
     assert "detailed_regime_report" not in exported_report
     assert "forecast_horizon_report" not in exported_report
     assert "identifiability" in exported_report
+    assert exported_report["storage_noise"] == []
     assert "selected_config" not in exported_report
     assert exported_report["selected_config_reference"]["reservoir_id"] == "lexington"
     assert exported_report["selected_config_reference"]["path"] == str(

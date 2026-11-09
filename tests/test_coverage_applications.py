@@ -195,6 +195,7 @@ def test_tuner_validates_edges_and_serializes_all_supported_values(
         base_objective=0.5,
         improvement_standard_error=0.01,
         identifiability=pd.DataFrame(),
+        storage_noise=pd.DataFrame(),
         warnings=(),
         timing_seconds={},
         candidate_summary=pd.DataFrame(),
@@ -213,8 +214,11 @@ def test_tuner_validates_edges_and_serializes_all_supported_values(
     result.identifiability = pd.DataFrame(
         {"curvature": [1.0]}, index=pd.Index(["q_inflow"], name="parameter")
     )
+    result.storage_noise = pd.DataFrame({"window": ["all"], "r_storage": [8.0]})
     run_noise_tuner._print_result(result)
-    assert "Identifiability:" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Identifiability:" in output
+    assert "Storage reading noise estimated from the data:" in output
 
 
 def test_tuner_import_path_setup_and_main_entrypoint(monkeypatch) -> None:
@@ -286,6 +290,7 @@ def test_tuner_runner_handles_empty_short_data_and_upstream_proxy(
         base_objective=0.5,
         improvement_standard_error=0.01,
         identifiability=pd.DataFrame(),
+        storage_noise=pd.DataFrame(),
         warnings=(),
         timing_seconds={},
         candidate_summary=pd.DataFrame(),
@@ -378,6 +383,7 @@ def test_noise_tuner_module_script_entrypoint(
         base_objective=0.5,
         improvement_standard_error=0.01,
         identifiability=pd.DataFrame(),
+        storage_noise=pd.DataFrame(),
         warnings=(),
         timing_seconds={},
         candidate_summary=pd.DataFrame(),
