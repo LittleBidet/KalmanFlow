@@ -430,6 +430,20 @@ def test_identifiability_report_flags_confounded_and_flat_terms() -> None:
     assert "not strictly convex" in warnings[1]
 
 
+def test_identifiability_report_treats_infinite_curvature_as_unknown() -> None:
+    # An invalid probe next to the optimum makes that diagonal entry +inf.
+    names = ["q_inflow", "r_storage"]
+    hessian = np.array([[np.inf, 0.0], [0.0, 2.0]])
+    frame, warnings = _identifiability._identifiability_report(hessian, names, 100)
+    assert np.isnan(frame.loc["q_inflow", "log_standard_error"])
+    assert frame.loc["r_storage", "log_standard_error"] == pytest.approx(
+        1.0 / np.sqrt(200.0)
+    )
+    assert warnings[0].startswith("q_inflow could not be checked")
+    assert not any("poorly identified" in warning for warning in warnings)
+    assert any("not strictly convex" in warning for warning in warnings)
+
+
 def test_log_space_hessian_matches_a_known_quadratic() -> None:
     def objective(parameters: dict[str, float]) -> float:
         a, b = np.log(parameters["q_storage"]), np.log(parameters["q_inflow"])

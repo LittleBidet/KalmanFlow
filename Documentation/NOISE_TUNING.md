@@ -128,7 +128,9 @@ Diagnostics never change the selection. The result reports:
   of the objective in log space, an approximate standard error of the log
   value, and the correlations implied by the inverse Hessian. Terms
   uncertain by more than a factor of e, and pairs correlated beyond ±0.95,
-  are named in warnings. The standard errors assume a correct Gaussian model.
+  are named in warnings, and so is a term whose curvature could not be
+  measured because a nearby step failed the validity checks; its standard
+  error is NaN. The standard errors assume a correct Gaussian model.
   The check adds about 2n² objective evaluations for n free terms; disable it
   with `check_identifiability=False`.
 * **Search status.** Each local search's evaluation count, convergence flag,

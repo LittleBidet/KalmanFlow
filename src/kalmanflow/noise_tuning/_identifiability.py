@@ -93,21 +93,37 @@ def _identifiability_report(
         ]
     else:
         # Without a positive-definite information matrix only each term's own
-        # curvature is usable, and correlations are unavailable.
+        # curvature is usable, and correlations are unavailable. Infinite
+        # curvature comes from a probe that failed the validity checks, so it
+        # says nothing about how well the term is identified.
         diagonal = np.diag(information)
         with np.errstate(divide="ignore", invalid="ignore"):
             log_standard_error = np.where(
-                diagonal > 0.0, 1.0 / np.sqrt(diagonal), np.inf
+                ~np.isfinite(diagonal),
+                np.nan,
+                np.where(diagonal > 0.0, 1.0 / np.sqrt(diagonal), np.inf),
             )
         warnings.append(
             "the objective is not strictly convex at the selected optimum, so "
             "parameter correlations are unavailable"
         )
+        unknown = [
+            name
+            for name, curvature in zip(names, diagonal, strict=True)
+            if not np.isfinite(curvature)
+        ]
+        if unknown:
+            warnings.insert(
+                0,
+                f"{', '.join(unknown)} could not be checked: a step of "
+                f"{_LOG_STEP:g} in log space reached noise settings that fail "
+                "the validity checks",
+            )
     frame.insert(1, "log_standard_error", log_standard_error)
     poorly_identified = [
         name
         for name, error in zip(names, log_standard_error, strict=True)
-        if not error <= _MAX_LOG_STANDARD_ERROR
+        if not np.isnan(error) and not error <= _MAX_LOG_STANDARD_ERROR
     ]
     if poorly_identified:
         warnings.insert(
