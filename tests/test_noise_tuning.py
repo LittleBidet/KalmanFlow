@@ -773,6 +773,32 @@ def test_failed_proxy_check_warns_but_never_changes_selection(
     assert warned is not passes
 
 
+@pytest.mark.parametrize(
+    ("proxy_index", "error", "message"),
+    [
+        (lambda index: index.tz_localize(None), ValueError, "timezone-aware"),
+        (lambda index: range(len(index)), TypeError, "DatetimeIndex"),
+    ],
+)
+def test_bad_proxy_index_is_rejected_before_any_filtering_pass(
+    monkeypatch: pytest.MonkeyPatch, proxy_index, error, message
+) -> None:
+    storage, discharge, windows = _inputs()
+    proxy = pd.Series(1.0, index=proxy_index(storage.index))
+    calls = 0
+    real_filter = _candidate.kalman_filter
+
+    def counting_filter(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_filter(*args, **kwargs)
+
+    monkeypatch.setattr(_candidate, "kalman_filter", counting_filter)
+    with pytest.raises(error, match=message):
+        _tune(storage, discharge, windows, upstream_proxy=proxy)
+    assert calls == 0
+
+
 def test_proxy_correlations_ignore_amplitude() -> None:
     index = pd.date_range("2026-01-01", periods=48, freq="h", tz="UTC")
     storm = np.exp(-(((np.arange(48) - 24.0) / 3.0) ** 2))

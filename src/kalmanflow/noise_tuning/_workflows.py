@@ -413,8 +413,8 @@ def _validate_tuning_arguments(
         raise ValueError("proposed_configuration_version is required")
     if version == base_config.configuration_version:
         raise ValueError("proposed_configuration_version must be new")
-    if upstream_proxy is not None and not isinstance(upstream_proxy, pd.Series):
-        raise TypeError("upstream_proxy must be a pandas Series or None")
+    if upstream_proxy is not None:
+        _proxy._validate_proxy(upstream_proxy)
     if progress is not None and not callable(progress):
         raise TypeError("progress must be callable or None")
 
