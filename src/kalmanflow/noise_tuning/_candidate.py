@@ -197,6 +197,6 @@ def _failed_window_row(window: ValidationWindow) -> dict[str, Any]:
         "storage_bias": np.nan,
         "outflow_bias": np.nan,
         "conditional_storage_bias": np.nan,
-        "coverage": 0.0,
+        "scored_fraction": 0.0,
         "regularization_count": 0,
     }

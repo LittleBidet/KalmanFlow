@@ -552,6 +552,32 @@ def test_candidate_handles_nonfinite_filter_and_scoring_failures(
     assert "excessive covariance regularization" in regularized.reasons
 
 
+def test_failed_window_rows_share_the_completed_row_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = _preparation._prepare(*_data(), _config())
+    windows = _windows(prepared.index)
+    settings = NoiseEvaluationSettings(warmup=timedelta(0))
+    completed = _candidate._evaluate_candidate(
+        prepared, q_inflow=1.0, windows=windows, settings=settings
+    )
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise ValueError("boom")
+
+    monkeypatch.setattr(_candidate, "kalman_filter", fail)
+    failed = _candidate._evaluate_candidate(
+        prepared, q_inflow=1.0, windows=windows, settings=settings
+    )
+    assert failed.filter_result is None
+    assert "filter failed: boom" in failed.reasons
+    for window in windows:
+        assert set(failed.window_rows[window.name]) == set(
+            completed.window_rows[window.name]
+        )
+        assert failed.window_rows[window.name]["scored_fraction"] == 0.0
+
+
 def test_proxy_scalar_guards_and_unavailable_paths() -> None:
     assert np.isnan(_proxy._correlation(np.ones(2), np.ones(2)))
     assert np.isnan(_proxy._correlation(np.ones(3), np.ones(4)))
