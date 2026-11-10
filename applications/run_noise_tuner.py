@@ -357,13 +357,25 @@ class _ProgressPrinter:
         self._last = update
         self._stream.flush()
 
-    def close(self) -> None:
-        """Complete both bars so later output starts on a clean line."""
+    def close(self, *, completed: bool = True) -> None:
+        """End the bars so later output starts on a clean line.
+
+        A completed run redraws both bars as full and ``done``. A run that
+        raised keeps its bars where they stopped, marked ``stopped``, so the
+        traceback below does not look like a finished run.
+        """
 
         if self._interactive and self._last is not None:
+            last = self._last
             self._stream.write(self._UP_ONE_LINE + "\r")
-            self._write_line(self._phase_line(_completed(self._last)))
-            self._write_line(self._total_line(self._last, 1.0, status="done"))
+            if completed:
+                self._write_line(self._phase_line(_completed(last)))
+                self._write_line(self._total_line(last, 1.0, status="done"))
+            else:
+                self._write_line(
+                    self._total_line(last, _total_fraction(last), status="stopped")
+                )
+                self._write_line(self._phase_line(last))
             self._stream.flush()
         self._last = None
 
@@ -475,6 +487,7 @@ def run_noise_tuner(
         if "upstream_flow" in diagnostics:
             upstream_proxy = diagnostics["upstream_flow"]
     progress = _ProgressPrinter()
+    completed = False
     try:
         result = tune_inflow_noise(
             storage=observations["storage"],
@@ -488,8 +501,9 @@ def run_noise_tuner(
             proposed_configuration_version=PROPOSED_CONFIGURATION_VERSION,
             progress=progress,
         )
+        completed = True
     finally:
-        progress.close()
+        progress.close(completed=completed)
     exported_config_path = export_reservoir_config(result.selected_config, destination)
     exported_report_path = None
     if report_destination is not None:
