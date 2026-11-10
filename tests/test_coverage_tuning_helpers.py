@@ -555,6 +555,10 @@ def test_candidate_handles_nonfinite_filter_and_scoring_failures(
         "_stable_logpdf",
         lambda *args, **kwargs: (1.0, 1.0, 1.0),
     )
+    # Regularization only happens on the scalar path, so send every row there.
+    monkeypatch.setattr(
+        _candidate, "_clean_rows", lambda finite, *arrays: np.zeros(len(finite), bool)
+    )
     regularized = _candidate._evaluate_candidate(
         prepared,
         q_inflow=1.0,

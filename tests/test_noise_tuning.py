@@ -635,6 +635,60 @@ def test_tuner_rejects_zero_base_term_for_multiplier_bounds() -> None:
         _tune(storage, discharge, windows, config=zero_q)
 
 
+def test_vectorized_row_scores_match_the_scalar_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, storage, discharge, windows = _synthetic_config_and_observations()
+    # Cover every observation pattern: both, storage only, outflow only, none.
+    storage = storage.copy()
+    discharge = discharge.copy()
+    storage.iloc[[30, 31, 95, 150]] = np.nan
+    discharge.iloc[[40, 41, 95, 160, 161]] = np.nan
+    prepared = _prepare(storage, discharge, config)
+    settings = NoiseEvaluationSettings(warmup=timedelta(0))
+    validated = _validate_windows(windows)
+
+    def evaluate():
+        return _candidate._evaluate_candidate(
+            prepared, q_inflow=0.04, windows=validated, settings=settings
+        )
+
+    vectorized = evaluate()
+    monkeypatch.setattr(
+        _candidate, "_clean_rows", lambda finite, *arrays: np.zeros(len(finite), bool)
+    )
+    scalar = evaluate()
+
+    for key, values in scalar.diagnostics.items():
+        np.testing.assert_allclose(
+            vectorized.diagnostics[key], values, rtol=1e-12, atol=1e-12, err_msg=key
+        )
+    assert vectorized.reasons == scalar.reasons
+    for name, row in scalar.window_rows.items():
+        for column, value in row.items():
+            if isinstance(value, float):
+                assert vectorized.window_rows[name][column] == pytest.approx(
+                    value, rel=1e-12, abs=1e-12, nan_ok=True
+                ), column
+            else:
+                assert vectorized.window_rows[name][column] == value, column
+
+
+def test_near_singular_rows_take_the_scalar_path() -> None:
+    finite = np.ones((3, 2), dtype=bool)
+    innovations = np.zeros((3, 2))
+    covariances = np.array(
+        [
+            [[1.0, 0.0], [0.0, 1.0]],
+            # Positive definite, but too close to singular for closed forms.
+            [[1.0, 1.0 - 1e-12], [1.0 - 1e-12, 1.0]],
+            [[0.0, 0.0], [0.0, 1.0]],
+        ]
+    )
+    clean = _candidate._clean_rows(finite, innovations, covariances)
+    assert clean.tolist() == [True, False, False]
+
+
 def test_joint_nlpd_is_aggregated_per_observed_component() -> None:
     index = pd.date_range("2025-01-01", periods=2, freq="h", tz="UTC")
     diagnostics = {
