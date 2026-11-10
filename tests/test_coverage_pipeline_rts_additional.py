@@ -239,9 +239,76 @@ def test_pipeline_restore_and_snapshot_validation_errors(
             ),
             "missing active observations",
         ),
+        (
+            _state(
+                PipelineInitializationPhase.WAITING_FOR_SECOND,
+                initial=_observation(0, storage=np.nan),
+            ),
+            "initial observation needs finite storage",
+        ),
+        (
+            _state(
+                PipelineInitializationPhase.REPLAY_FROM_INITIALIZATION,
+                last=valid_second.timestamp,
+                observations=(_observation(0, storage=np.nan), valid_second),
+            ),
+            "must start with finite storage",
+        ),
+        (
+            _state(
+                PipelineInitializationPhase.REPLAY_FROM_INITIALIZATION,
+                last=valid_second.timestamp,
+                observations=(
+                    Observation(START, storage=100.0, discharge=np.nan),
+                    valid_second,
+                ),
+            ),
+            "must start with finite storage and discharge",
+        ),
+        (
+            _state(
+                PipelineInitializationPhase.REPLAY_FROM_INITIALIZATION,
+                last=valid_second.timestamp,
+                observations=(valid_first, _observation(15, storage=np.nan)),
+            ),
+            "finite storage in its second",
+        ),
+        (
+            _state(
+                PipelineInitializationPhase.WAITING_FOR_FIRST,
+                last=datetime(2024, 1, 1),
+            ),
+            "timezone-aware",
+        ),
     ]
     for state, message in cases:
         with pytest.raises(ValueError, match=message):
+            pipeline._validate_state(state)
+
+    type_cases = [
+        (
+            _state(PipelineInitializationPhase.WAITING_FOR_FIRST, last="2024-01-01"),
+            "datetime",
+        ),
+        (
+            _state(
+                PipelineInitializationPhase.WAITING_FOR_SECOND,
+                initial=(START, 100.0, 4.0),  # type: ignore[arg-type]
+            ),
+            "Observation instances",
+        ),
+        (
+            _state(
+                PipelineInitializationPhase.REPLAY_FROM_ANCHOR,
+                last=valid_second.timestamp,
+                anchor=anchor,
+                observations=(valid_second, object()),  # type: ignore[arg-type]
+            ),
+            "Observation instances",
+        ),
+    ]
+    for state, message in type_cases:
+        with pytest.raises(TypeError, match=message):
             pipeline._validate_state(state)
 
     replay_state = _state(

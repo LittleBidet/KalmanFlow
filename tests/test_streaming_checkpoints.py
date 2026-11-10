@@ -116,6 +116,41 @@ def test_restore_after_every_observation_matches_uninterrupted_execution() -> No
     _assert_updates_equal(actual, expected)
 
 
+def test_restore_with_missing_values_in_the_window_matches_uninterrupted() -> None:
+    # Missing values that a live stream accepts must survive a checkpoint:
+    # skipped start-up storage, a second row without discharge, and window
+    # rows without storage or discharge.
+    config = _config()
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    values = (
+        (np.nan, 4.0),
+        (100.0, 4.0),
+        (101.0, np.nan),
+        (np.nan, 4.2),
+        (103.0, np.nan),
+        (np.nan, np.nan),
+        (105.0, 4.5),
+        (106.0, 4.6),
+    )
+    observations = tuple(
+        Observation(start + timedelta(minutes=15 * index), storage, discharge)
+        for index, (storage, discharge) in enumerate(values)
+    )
+    uninterrupted = OnlineReservoirInflow.from_config(config)
+    expected = tuple(uninterrupted.process(observation) for observation in observations)
+
+    stream = OnlineReservoirInflow.from_config(config)
+    actual = []
+    for observation in observations:
+        actual.append(stream.process(observation))
+        stream = OnlineReservoirInflow.from_checkpoint(
+            stream.checkpoint(),
+            config=config,
+        )
+
+    _assert_updates_equal(actual, expected)
+
+
 def test_checkpoint_survives_a_real_process_restart(tmp_path: Path) -> None:
     checkpoint_path = tmp_path / "reservoir.checkpoint"
     driver = """

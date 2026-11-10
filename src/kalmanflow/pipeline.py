@@ -432,7 +432,14 @@ class OnlineInflowPipeline:
             raise ValueError("pipeline snapshot has an unsupported phase") from error
 
         if state.last_input_timestamp is not None:
-            to_utc(state.last_input_timestamp)
+            aware_timestamp(state.last_input_timestamp)
+        observations = list(state.unfinished_observations)
+        if state.initial_observation is not None:
+            observations.append(state.initial_observation)
+        if not all(isinstance(item, Observation) for item in observations):
+            raise TypeError(
+                "pipeline snapshot observations must be Observation instances"
+            )
 
         if phase is PipelineInitializationPhase.WAITING_FOR_FIRST:
             if (
@@ -453,6 +460,10 @@ class OnlineInflowPipeline:
                 raise ValueError("waiting-for-second snapshot is incomplete")
             if state.last_input_timestamp is None:
                 raise ValueError("waiting-for-second snapshot has no last timestamp")
+            if not (isfinite(first.storage) and isfinite(first.discharge)):
+                raise ValueError(
+                    "initial observation needs finite storage and discharge"
+                )
             if to_utc(first.timestamp) > to_utc(state.last_input_timestamp):
                 raise ValueError(
                     "initial observation is after the last input timestamp"
@@ -468,6 +479,19 @@ class OnlineInflowPipeline:
                 raise ValueError("initialization replay snapshot has a filter anchor")
             if len(state.unfinished_observations) < 2:
                 raise ValueError("initialization replay needs two observations")
+            # Replay must rebuild the same two initialization steps; a row it
+            # would skip as start-up data would shift the whole window.
+            first, second = state.unfinished_observations[:2]
+            if not (isfinite(first.storage) and isfinite(first.discharge)):
+                raise ValueError(
+                    "initialization replay must start with finite storage and "
+                    "discharge"
+                )
+            if not isfinite(second.storage):
+                raise ValueError(
+                    "initialization replay needs finite storage in its second "
+                    "observation"
+                )
             previous_timestamp: datetime | None = None
         else:
             anchor = state.filter_anchor
