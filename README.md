@@ -58,13 +58,13 @@ KalmanFlow requires Python 3.12 or newer.
 pip install kalmanflow
 ```
 
-For experimental Bayesian noise tuning, install the optional extra:
+For experimental noise tuning, install the optional extra:
 
 ```bash
 pip install "kalmanflow[tuning]"
 ```
 
-The base installation supports filtering, smoothing, and frozen-configuration evaluation without SciPy or scikit-learn. Bayesian tuning is **experimental**: its API, selection rules, and result schema may change between releases.
+The base installation supports filtering, smoothing, and frozen-configuration evaluation without SciPy. Noise tuning is **experimental**: its API, selection rules, and result schema may change between releases.
 
 For development in this repository:
 
@@ -200,7 +200,7 @@ revisions, including the trailing row, remain `NaN`.
 | `OnlineReservoirInflow.from_config`         | You need a configured, checkpoint-capable streaming estimator.                                                      |
 | `OnlineInflowPipeline`                      | You are integrating a custom backend or smoother.                                                                   |
 | `add_inflow_uncertainty_intervals`          | You want normal-theory lower and upper interval columns for an opt-in batch result.                                 |
-| `tune_inflow_noise_bayesian` (experimental) | You want to propose five diagonal `q`/`r` noise terms from causal innovation scores; requires `kalmanflow[tuning]`. |
+| `tune_inflow_noise` (experimental)          | You want to propose five diagonal `q`/`r` noise terms by causal maximum likelihood; requires `kalmanflow[tuning]`.  |
 | `evaluate_configuration`                    | You want to assess one frozen configuration on an untouched period without searching.                               |
 | Notebook-local `validation.py`              | You want hourly proxy-agreement, lag, and storage-closure validation tables and plots.                              |
 
@@ -214,7 +214,7 @@ revisions, including the trailing row, remain `NaN`.
 - [Online pipeline](https://github.com/LittleBidet/KalmanFlow/blob/main/Documentation/ONLINE_INFLOW_PIPELINE.md): lifecycle, checkpoints, and failure behavior.
 - [Configuration](https://github.com/LittleBidet/KalmanFlow/blob/main/Documentation/CONFIGURATION.md): complete configuration example, unit conventions, and parameter selection.
 - [Validation](https://github.com/LittleBidet/KalmanFlow/blob/main/Documentation/VALIDATION.md): regular comparison frames, upstream-proxy metrics, lag selection, and storage closure.
-- [Bayesian innovation noise tuning](https://github.com/LittleBidet/KalmanFlow/blob/main/Documentation/BAYESIAN_NOISE_TUNING.md): five-parameter causal covariance search without true inflow labels.
+- [Noise tuning](https://github.com/LittleBidet/KalmanFlow/blob/main/Documentation/NOISE_TUNING.md): five-parameter maximum-likelihood covariance search without true inflow labels.
 - [API reference](https://github.com/LittleBidet/KalmanFlow/blob/main/Documentation/API_REFERENCE.md): every package-level export, plus the advanced module interfaces.
 
 

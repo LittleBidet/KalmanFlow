@@ -4,8 +4,6 @@ import subprocess
 import sys
 import textwrap
 
-import pytest
-
 
 def _run_python(source: str) -> None:
     result = subprocess.run(
@@ -24,7 +22,7 @@ def test_filtering_and_evaluation_do_not_import_optimizer_dependencies() -> None
 
         class NoOptimizerImports(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
-                if fullname.split('.')[0] in {'scipy', 'sklearn'}:
+                if fullname.split('.')[0] == 'scipy':
                     raise AssertionError(f'Unexpected optional import: {fullname}')
 
         sys.meta_path.insert(0, NoOptimizerImports())
@@ -32,9 +30,9 @@ def test_filtering_and_evaluation_do_not_import_optimizer_dependencies() -> None
         import numpy as np
         import pandas as pd
         from kalmanflow import (
-            BayesianEvaluationSettings,
+            NoiseEvaluationSettings,
             ReservoirConfig, evaluate_configuration, get_reservoir_inflow,
-            tune_inflow_noise_bayesian,
+            tune_inflow_noise,
         )
 
         index = pd.date_range('2026-01-01', periods=6, freq='h', tz='UTC')
@@ -48,15 +46,15 @@ def test_filtering_and_evaluation_do_not_import_optimizer_dependencies() -> None
         )
         evaluation = evaluate_configuration(
             storage, discharge, config,
-            settings=BayesianEvaluationSettings(warmup=timedelta(0)),
+            settings=NoiseEvaluationSettings(warmup=timedelta(0)),
         )
         assert evaluation.window_diagnostics.iloc[0]['storage_count'] == 4
-        assert 'kalmanflow.bayesian_tuning._optimization' not in sys.modules
+        assert 'kalmanflow.noise_tuning._optimization' not in sys.modules
     """)
 
 
-@pytest.mark.parametrize("missing", ["scipy", "sklearn"])
-def test_missing_tuning_dependency_has_install_guidance(missing: str) -> None:
+def test_missing_tuning_dependency_has_install_guidance() -> None:
+    missing = "scipy"
     _run_python(f"""
         import importlib.abc
         import sys
@@ -68,9 +66,9 @@ def test_missing_tuning_dependency_has_install_guidance(missing: str) -> None:
                                               name=fullname)
 
         sys.meta_path.insert(0, MissingDependency())
-        from kalmanflow import tune_inflow_noise_bayesian
+        from kalmanflow import tune_inflow_noise
         try:
-            tune_inflow_noise_bayesian(None, None, None, [], [])
+            tune_inflow_noise(None, None, None, [], [])
         except ImportError as error:
             assert "pip install 'kalmanflow[tuning]'" in str(error)
             assert error.__cause__.name == {missing!r}

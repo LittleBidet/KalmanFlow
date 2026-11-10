@@ -13,7 +13,7 @@
 | `kalmanflow.pipeline` | Generic initialization, ordering, replay, and delayed-release coordinator. |
 | `kalmanflow.core` | Public batch and reservoir-streaming adapters. |
 | `kalmanflow.pandas_api` | DataFrame convenience wrapper for the default batch adapter. |
-| `kalmanflow.bayesian_tuning` | Public façade for Bayesian diagonal-noise search and compact frozen-configuration evaluation; implementation is split across preparation, diagnostics, candidate, optimization, proxy, and workflow modules. |
+| `kalmanflow.noise_tuning` | Public façade for maximum-likelihood diagonal-noise search and compact frozen-configuration evaluation; implementation is split across preparation, diagnostics, candidate, parameter-space, optimization, identifiability, proxy, and workflow modules. |
 | `kalmanflow.reservoir_config` | Immutable, validated per-reservoir configuration. |
 | `kalmanflow.observations` / `flags` | Public input and output-provenance types. |
 | `kalmanflow.units` | Volume/flow-rate conversion systems. |
@@ -28,8 +28,8 @@ formats or extension points.
 
 Repository-specific workflows live outside the package in `applications/`:
 `applications/preparation.py` parses and aligns the checked-in Aquarius
-exports, while `applications/run_bayesian_tuner.py` provides the offline
-Bayesian calibration entry point.
+exports, while `applications/run_noise_tuner.py` provides the offline
+noise calibration entry point.
 `Notebooks/prepare_reservoir_data.py` remains a compatibility import for
 existing notebooks.
 
@@ -72,7 +72,7 @@ covariance into pointwise standard deviations; this output is disabled by
 default. Generic filter and smoothing types remain available for advanced
 integrations.
 
-Offline calibration uses `tune_inflow_noise_bayesian` with clean, aligned
+Offline calibration uses `tune_inflow_noise` with clean, aligned
 storage and discharge series. It proposes a new immutable configuration but
 does not persist or activate it. `evaluate_configuration` scores one frozen
 configuration on a separate period without performing another search.

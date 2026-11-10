@@ -2,16 +2,6 @@
 
 from importlib.metadata import PackageNotFoundError, version
 
-from .bayesian_tuning import (
-    BayesianEvaluationSettings,
-    BayesianTuningError,
-    BayesianTuningResult,
-    BayesianTuningSettings,
-    ConfigEvaluationResult,
-    ValidationWindow,
-    evaluate_configuration,
-    tune_inflow_noise_bayesian,
-)
 from .core import (
     OnlineReservoirInflow,
     ReservoirFlowEstimate,
@@ -32,6 +22,18 @@ from .kalman import (
 from .models import (
     ReservoirStateSpaceModel,
     StateSpaceModel,
+)
+from .noise_tuning import (
+    ConfigEvaluationResult,
+    NoiseEvaluationSettings,
+    NoiseTuningError,
+    NoiseTuningProgress,
+    NoiseTuningResult,
+    NoiseTuningSettings,
+    ValidationWindow,
+    estimate_storage_noise,
+    evaluate_configuration,
+    tune_inflow_noise,
 )
 from .observations import Observation
 from .pandas_api import run_inflow_model
@@ -78,12 +80,14 @@ __all__ = [
     "predict_state",
     "run_inflow_model",
     "smooth_filter_steps",
-    "BayesianEvaluationSettings",
-    "BayesianTuningError",
     "ConfigEvaluationResult",
+    "NoiseEvaluationSettings",
+    "NoiseTuningError",
+    "NoiseTuningProgress",
+    "NoiseTuningResult",
+    "NoiseTuningSettings",
     "ValidationWindow",
+    "estimate_storage_noise",
     "evaluate_configuration",
-    "BayesianTuningResult",
-    "BayesianTuningSettings",
-    "tune_inflow_noise_bayesian",
+    "tune_inflow_noise",
 ]

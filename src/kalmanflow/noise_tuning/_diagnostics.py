@@ -10,9 +10,12 @@ import pandas as pd
 
 from ..kalman import KalmanFilterResult
 from ._preparation import _timestamp_seconds, _validate_index
-from ._types import BayesianEvaluationSettings, ValidationWindow
+from ._types import NoiseEvaluationSettings, ValidationWindow
 
 Array = np.ndarray
+
+# Two-sided standard-normal quantiles for central predictive intervals.
+_CENTRAL_INTERVAL_Z = {50: 0.6744897501960817, 90: 1.6448536269514722}
 
 
 def _hourly_increment_sd_to_q(hourly_increment_sd: float) -> float:
@@ -314,7 +317,7 @@ def _aggregate_arrays(
         "storage_bias": mean_metric("storage_z"),
         "outflow_bias": mean_metric("outflow_z"),
         "conditional_storage_bias": mean_metric("conditional_storage_z"),
-        "coverage": float(np.sum(primary_mask) / max(1, np.sum(eligible_mask))),
+        "scored_fraction": float(np.sum(primary_mask) / max(1, np.sum(eligible_mask))),
         "regularization_count": int(np.sum(diagnostics["jitter"][joint_mask] > 0)),
     }
 
@@ -324,7 +327,7 @@ def _physical_metrics_arrays(
     diagnostics: Mapping[str, np.ndarray],
     timestamps: pd.DatetimeIndex,
     validation_mask: np.ndarray,
-    settings: BayesianEvaluationSettings,
+    settings: NoiseEvaluationSettings,
 ) -> dict[str, float]:
     indices = np.flatnonzero(validation_mask)
     validation_timestamps = timestamps[indices]
@@ -339,10 +342,23 @@ def _physical_metrics_arrays(
     normalized = differences / intervals if len(differences) else np.array([])
     finite_norm = normalized[np.isfinite(normalized)]
 
-    def finite_mean(key: str) -> float:
+    def finite_values(key: str) -> Array:
         values = diagnostics[key][indices]
-        values = values[np.isfinite(values)]
+        return values[np.isfinite(values)]
+
+    def finite_mean(key: str) -> float:
+        values = finite_values(key)
         return float(np.mean(values)) if len(values) else np.nan
+
+    def finite_variance(key: str) -> float:
+        values = finite_values(key)
+        return float(np.var(values, ddof=1)) if len(values) > 1 else np.nan
+
+    def interval_coverage(key: str, level: int) -> float:
+        values = finite_values(key)
+        if not len(values):
+            return np.nan
+        return float(np.mean(np.abs(values) <= _CENTRAL_INTERVAL_Z[level]))
 
     def autocorrelation_metrics(key: str) -> tuple[float, float]:
         if len(validation_timestamps) < 2:
@@ -395,6 +411,16 @@ def _physical_metrics_arrays(
         "storage_nis": finite_mean("storage_nis"),
         "outflow_nis": finite_mean("outflow_nis"),
         "conditional_storage_nis": finite_mean("conditional_storage_nis"),
+        # A calibrated scalar NIS is chi-squared with one degree of freedom:
+        # mean 1 and variance 2. Coverage is the share of observations inside
+        # the central 50% and 90% predictive intervals.
+        "storage_nis_variance": finite_variance("storage_nis"),
+        "outflow_nis_variance": finite_variance("outflow_nis"),
+        **{
+            f"{channel}_coverage_{level}": interval_coverage(f"{channel}_z", level)
+            for channel in ("storage", "outflow")
+            for level in _CENTRAL_INTERVAL_Z
+        },
         "causal_storage_prediction_rmse": float(np.sqrt(np.mean(scored_storage**2)))
         if len(scored_storage)
         else np.nan,
@@ -418,7 +444,7 @@ def _physical_metrics_arrays(
 def _paired_standard_error(
     differences: Array,
     weights: Array,
-    settings: BayesianEvaluationSettings,
+    settings: NoiseEvaluationSettings,
 ) -> float:
     mean = float(np.dot(weights, differences))
     if len(differences) >= 5 and settings.bootstrap_samples > 1:
@@ -438,3 +464,75 @@ def _paired_standard_error(
         return 0.0
     unbiased_variance = float(np.dot(weights, (differences - mean) ** 2) / denominator)
     return sqrt(max(0.0, unbiased_variance * sum_squared_weights))
+
+
+def _weighted_standard_error(values: Array, weights: Array) -> float:
+    """Return the standard error of a weighted mean across validation windows."""
+
+    finite = np.isfinite(values)
+    if finite.sum() < 2:
+        return 0.0
+    values = values[finite]
+    weights = np.asarray(weights, dtype=float)[finite]
+    weights = weights / weights.sum()
+    sum_squared_weights = float(np.sum(weights * weights))
+    denominator = 1.0 - sum_squared_weights
+    if denominator <= 0.0:
+        return 0.0
+    mean = float(np.dot(weights, values))
+    variance = float(np.dot(weights, (values - mean) ** 2) / denominator)
+    return sqrt(max(0.0, variance * sum_squared_weights))
+
+
+def _calibration_warnings(
+    physical: Mapping[str, float], settings: NoiseEvaluationSettings
+) -> tuple[str, ...]:
+    """Describe each configured calibration check that the metrics fail.
+
+    These checks are diagnostic: under a Gaussian model a heavy-tailed or
+    serially correlated innovation sequence fails them at any noise setting,
+    which points at the model structure rather than at the tuning.
+    """
+
+    checks: list[tuple[str, float, float]] = []
+    if settings.nis_warning_range is not None:
+        low, high = settings.nis_warning_range
+        checks += [
+            (name, low, high) for name in ("joint_nis", "storage_nis", "outflow_nis")
+        ]
+    if settings.innovation_bias_warning is not None:
+        limit = settings.innovation_bias_warning
+        checks += [
+            (name, -limit, limit)
+            for name in ("storage_bias", "outflow_bias", "conditional_storage_bias")
+        ]
+    if settings.autocorrelation_warning is not None:
+        checks.append(
+            (
+                "max_material_elapsed_lag_autocorrelation",
+                -settings.autocorrelation_warning,
+                settings.autocorrelation_warning,
+            )
+        )
+    if settings.coverage_warning is not None:
+        tolerance = settings.coverage_warning
+        checks += [
+            (
+                f"{channel}_coverage_{level}",
+                level / 100 - tolerance,
+                level / 100 + tolerance,
+            )
+            for channel in ("storage", "outflow")
+            for level in _CENTRAL_INTERVAL_Z
+        ]
+    warnings = []
+    for name, low, high in checks:
+        value = float(physical.get(name, np.nan))
+        if not np.isfinite(value):
+            warnings.append(f"{name} is unavailable for calibration")
+        elif not low <= value <= high:
+            warnings.append(
+                f"{name}={value:.4g} is outside the calibration range "
+                f"[{low:.4g}, {high:.4g}]"
+            )
+    return tuple(warnings)

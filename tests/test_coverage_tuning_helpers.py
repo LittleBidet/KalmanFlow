@@ -8,16 +8,18 @@ import pandas as pd
 import pytest
 
 from kalmanflow import (
-    BayesianEvaluationSettings,
-    BayesianTuningSettings,
+    NoiseEvaluationSettings,
+    NoiseTuningSettings,
     ReservoirConfig,
     UnitSystem,
     ValidationWindow,
 )
-from kalmanflow.bayesian_tuning import (
+from kalmanflow.noise_tuning import (
     _candidate,
     _diagnostics,
+    _identifiability,
     _optimization,
+    _parameters,
     _preparation,
     _proxy,
     _types,
@@ -68,67 +70,63 @@ def test_types_reject_invalid_timestamps_and_window_values() -> None:
     np.testing.assert_array_equal(window.mask(index), [True, False])
 
 
-def test_evaluation_settings_validate_all_numeric_thresholds() -> None:
-    invalid = (
-        ("warmup", "nonnegative"),
-        ("practical_equivalence_tolerance", "nonnegative"),
-        ("max_jitter_fraction", "nonnegative"),
-        ("nis_warning_range", "finite increasing"),
-        ("innovation_bias_warning", "nonnegative"),
-    )
-    values = {
-        "warmup": "1h",
-        "practical_equivalence_tolerance": -1.0,
-        "max_jitter_fraction": -1.0,
-        "nis_warning_range": (2.0, 1.0),
-        "innovation_bias_warning": -1.0,
-    }
-    for field, message in invalid:
-        with pytest.raises((TypeError, ValueError), match=message):
-            BayesianEvaluationSettings(**{field: values[field]})
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("warmup", "1h", "nonnegative"),
+        ("innovation_max_lag", "1h", "positive"),
+        ("practical_equivalence_tolerance", -1.0, "nonnegative"),
+        ("max_jitter_fraction", np.inf, "nonnegative"),
+        ("nis_warning_range", (2.0, 1.0), "finite increasing"),
+        ("innovation_bias_warning", -1.0, "nonnegative"),
+        ("autocorrelation_warning", np.nan, "nonnegative"),
+        ("coverage_warning", -0.1, "nonnegative"),
+    ],
+)
+def test_evaluation_settings_validate_all_numeric_thresholds(
+    field: str, value: object, message: str
+) -> None:
+    with pytest.raises((TypeError, ValueError), match=message):
+        NoiseEvaluationSettings(**{field: value})
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
     [
         ("q_storage_multiplier_bounds", (0.0, 1.0)),
+        ("q_inflow_multiplier_bounds", (1.0,)),
         ("q_outflow_multiplier_bounds", (2.0, 1.0)),
         ("r_storage_multiplier_bounds", (np.nan, 1.0)),
         ("r_outflow_multiplier_bounds", (1.0, 1.0)),
-        ("one_standard_error_weight", -1.0),
-        ("max_abs_elapsed_lag_autocorrelation", -1.0),
-        ("expected_improvement_xi", -1.0),
+        ("local_searches", 0),
+        ("max_evaluations_per_search", 0),
         ("proxy_max_lag", timedelta(days=-1)),
+        ("proxy_max_lag", "1h"),
         ("proxy_diagnostic_frequency", timedelta(0)),
         ("proxy_min_shape_correlation", 2.0),
         ("proxy_min_change_correlation", -2.0),
-        ("proxy_max_shape_rmse", -1.0),
     ],
 )
 def test_tuning_settings_reject_invalid_bounds(field: str, value: object) -> None:
     with pytest.raises((TypeError, ValueError)):
-        BayesianTuningSettings(**{field: value})
+        NoiseTuningSettings(**{field: value})
 
 
 def test_result_dataclasses_require_dataframes() -> None:
-    storage, discharge = _data()
-    index = storage.index
     config = _config()
     with pytest.raises(TypeError, match="candidate_summary"):
         _types.ConfigEvaluationResult(config, [], pd.DataFrame())  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="proxy_diagnostics"):
-        _types.BayesianTuningResult(
+    with pytest.raises(TypeError, match="identifiability"):
+        _types.NoiseTuningResult(
             selected_config=config,
             selected_parameters={},
+            selected_objective=0.0,
+            base_objective=0.0,
+            improvement_standard_error=0.0,
             candidate_summary=pd.DataFrame(),
             window_diagnostics=pd.DataFrame(),
-            competitive_trial_ids=(),
-            selected_objective=0.0,
-            selection_threshold=0.0,
-            selection_reason="test",
-            proxy_diagnostics=[],  # type: ignore[arg-type]
+            identifiability=[],  # type: ignore[arg-type]
         )
-    assert index.equals(discharge.index)
 
 
 @pytest.mark.parametrize(
@@ -352,13 +350,13 @@ def test_physical_metrics_reports_unavailable_sparse_autocorrelation() -> None:
         diagnostics,
         timestamps,
         np.ones(3, dtype=bool),
-        BayesianEvaluationSettings(warmup=timedelta(0)),
+        NoiseEvaluationSettings(warmup=timedelta(0)),
     )
     assert np.isnan(metrics["max_storage_elapsed_lag_autocorrelation"])
 
 
 def test_paired_standard_error_bootstrap_and_degenerate_weights() -> None:
-    settings = BayesianEvaluationSettings(bootstrap_samples=3, random_seed=4)
+    settings = NoiseEvaluationSettings(bootstrap_samples=3, random_seed=4)
     output = _diagnostics._paired_standard_error(
         np.arange(5, dtype=float), np.full(5, 0.2), settings
     )
@@ -368,57 +366,121 @@ def test_paired_standard_error_bootstrap_and_degenerate_weights() -> None:
     ) == 0.0
 
 
-def test_optimization_helpers_cover_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert _optimization._weighted_standard_error(
+def test_weighted_standard_error_handles_degenerate_inputs() -> None:
+    assert _diagnostics._weighted_standard_error(
         np.array([1.0, np.nan]), np.array([1.0, 1.0])
     ) == 0.0
-    assert _optimization._weighted_standard_error(
+    assert _diagnostics._weighted_standard_error(
         np.array([1.0, 2.0]), np.array([1.0, 0.0])
     ) == 0.0
-    options = BayesianTuningSettings(acquisition_pool_size=128)
-    with pytest.raises(ValueError, match="at least three"):
-        _optimization._parameter_bounds(_config(), [1.0, 2.0], options)
+    assert _diagnostics._weighted_standard_error(
+        np.array([0.0, 2.0]), np.array([1.0, 1.0])
+    ) == pytest.approx(1.0)
 
-    rng = np.random.default_rng(2)
-    point, source = _optimization._fit_and_acquire([], [], [], rng, options)
-    assert point.shape == (5,)
-    assert source == "space-filling-fallback"
-    point, source = _optimization._fit_and_acquire(
-        [], [], [np.zeros(5)], np.random.default_rng(2), options
+
+def test_local_search_reports_convergence_and_invalid_values() -> None:
+    target = np.array([0.25, 0.75])
+
+    def quadratic(point: np.ndarray) -> float:
+        return float(np.sum((point - target) ** 2))
+
+    outcome = _optimization._local_search(quadratic, np.full(2, 0.5), 100)
+    assert outcome.converged
+    np.testing.assert_allclose(outcome.point, target, atol=1e-5)
+    assert outcome.evaluations > 1
+
+    def invalid_near_start(point: np.ndarray) -> float:
+        return np.inf if point[0] > 0.5 else quadratic(point)
+
+    stopped = _optimization._local_search(invalid_near_start, np.full(2, 0.5), 100)
+    assert not stopped.converged
+    assert "numerically invalid" in stopped.message
+
+
+def test_parameter_space_round_trips_and_reports_bounds() -> None:
+    space = _parameters._ParameterSpace.from_settings(
+        _config(), NoiseTuningSettings(q_storage_multiplier_bounds=(2.0, 3.0))
     )
-    assert point.shape == (5,)
-    assert source == "space-filling-fallback"
-
-    class ZeroRng:
-        def random(self, shape: object) -> np.ndarray:
-            return np.zeros(shape, dtype=float)
-
-        def normal(self, *args: object, size: tuple[int, int]) -> np.ndarray:
-            return np.zeros(size, dtype=float)
-
-    point, source = _optimization._fit_and_acquire(
-        [np.zeros(5)], [1.0], [np.zeros(5)], ZeroRng(), options  # type: ignore[arg-type]
+    parameters = space.decode(np.full(5, 0.5))
+    np.testing.assert_allclose(space.encode(parameters), 0.5)
+    assert space.names_at_bounds(parameters) == ()
+    assert space.names_at_bounds(space.decode(np.array([0, 0.5, 1, 0.5, 0.5]))) == (
+        "q_storage",
+        "q_outflow",
     )
-    assert point.shape == (5,)
-    assert source == "random-fallback"
+    # The base q_storage (1x) lies below the 2x-3x box and starts on its edge.
+    starts = space.starting_points([2.0, 2.0, 5.0])
+    assert len(starts) == 2
+    assert all(start[0] == 0.0 for start in starts)
 
-    class FailingModel:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            pass
 
-        def fit(self, *args: object, **kwargs: object) -> None:
-            raise ValueError("synthetic GP failure")
+def test_identifiability_report_flags_confounded_and_flat_terms() -> None:
+    names = ["q_storage", "q_inflow"]
+    ridge = np.array([[1.0, 0.99], [0.99, 1.0]])
+    frame, warnings = _identifiability._identifiability_report(ridge, names, 10_000)
+    assert frame.loc["q_storage", "q_inflow"] == pytest.approx(-0.99)
+    assert frame.loc["q_storage", "log_standard_error"] < 1.0
+    assert any("strongly confounded" in warning for warning in warnings)
 
-    monkeypatch.setattr(_optimization, "GaussianProcessRegressor", FailingModel)
-    point, source = _optimization._fit_and_acquire(
-        [np.zeros(5), np.ones(5)],
-        [1.0, 2.0],
-        [np.zeros(5), np.ones(5)],
-        np.random.default_rng(3),
-        options,
+    flat = np.array([[1.0, 0.0], [0.0, 0.0]])
+    frame, warnings = _identifiability._identifiability_report(flat, names, 100)
+    assert np.isinf(frame.loc["q_inflow", "log_standard_error"])
+    assert frame[names].isna().all().all()
+    assert warnings[0].startswith("q_inflow are poorly identified")
+    assert "not strictly convex" in warnings[1]
+
+
+def test_log_space_hessian_matches_a_known_quadratic() -> None:
+    def objective(parameters: dict[str, float]) -> float:
+        a, b = np.log(parameters["q_storage"]), np.log(parameters["q_inflow"])
+        return 2.0 * a * a + a * b + 3.0 * b * b
+
+    parameters = dict.fromkeys(_types._PARAMETER_NAMES, 1.0)
+    hessian = _identifiability._log_space_hessian(
+        objective, parameters, ["q_storage", "q_inflow"]
     )
-    assert point.shape == (5,)
-    assert source == "space-filling-fallback"
+    np.testing.assert_allclose(hessian, [[4.0, 1.0], [1.0, 6.0]], atol=1e-9)
+
+
+def test_calibration_warnings_cover_each_check_and_disabling() -> None:
+    calibrated = {
+        "joint_nis": 1.0,
+        "storage_nis": 1.0,
+        "outflow_nis": 1.0,
+        "storage_bias": 0.0,
+        "outflow_bias": 0.0,
+        "conditional_storage_bias": 0.0,
+        "max_material_elapsed_lag_autocorrelation": 0.1,
+        "storage_coverage_50": 0.5,
+        "storage_coverage_90": 0.9,
+        "outflow_coverage_50": 0.5,
+        "outflow_coverage_90": 0.9,
+    }
+    settings = NoiseEvaluationSettings()
+    assert _diagnostics._calibration_warnings(calibrated, settings) == ()
+    miscalibrated = {
+        **calibrated,
+        "storage_nis": 3.0,
+        "outflow_bias": -1.0,
+        "max_material_elapsed_lag_autocorrelation": 0.5,
+        "storage_coverage_50": 0.8,
+        "outflow_coverage_90": np.nan,
+    }
+    warnings = _diagnostics._calibration_warnings(miscalibrated, settings)
+    assert {warning.split("=")[0].split(" ")[0] for warning in warnings} == {
+        "storage_nis",
+        "outflow_bias",
+        "max_material_elapsed_lag_autocorrelation",
+        "storage_coverage_50",
+        "outflow_coverage_90",
+    }
+    disabled = NoiseEvaluationSettings(
+        nis_warning_range=None,
+        innovation_bias_warning=None,
+        autocorrelation_warning=None,
+        coverage_warning=None,
+    )
+    assert _diagnostics._calibration_warnings(miscalibrated, disabled) == ()
 
 
 def test_candidate_handles_nonfinite_filter_and_scoring_failures(
@@ -453,7 +515,7 @@ def test_candidate_handles_nonfinite_filter_and_scoring_failures(
         prepared,
         q_inflow=1.0,
         windows=windows,
-        settings=BayesianEvaluationSettings(
+        settings=NoiseEvaluationSettings(
             warmup=timedelta(0), max_jitter_fraction=0.0
         ),
     )
@@ -483,11 +545,37 @@ def test_candidate_handles_nonfinite_filter_and_scoring_failures(
         prepared,
         q_inflow=1.0,
         windows=windows,
-        settings=BayesianEvaluationSettings(
+        settings=NoiseEvaluationSettings(
             warmup=timedelta(0), max_regularized_steps=0
         ),
     )
     assert "excessive covariance regularization" in regularized.reasons
+
+
+def test_failed_window_rows_share_the_completed_row_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = _preparation._prepare(*_data(), _config())
+    windows = _windows(prepared.index)
+    settings = NoiseEvaluationSettings(warmup=timedelta(0))
+    completed = _candidate._evaluate_candidate(
+        prepared, q_inflow=1.0, windows=windows, settings=settings
+    )
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise ValueError("boom")
+
+    monkeypatch.setattr(_candidate, "kalman_filter", fail)
+    failed = _candidate._evaluate_candidate(
+        prepared, q_inflow=1.0, windows=windows, settings=settings
+    )
+    assert failed.filter_result is None
+    assert "filter failed: boom" in failed.reasons
+    for window in windows:
+        assert set(failed.window_rows[window.name]) == set(
+            completed.window_rows[window.name]
+        )
+        assert failed.window_rows[window.name]["scored_fraction"] == 0.0
 
 
 def test_proxy_scalar_guards_and_unavailable_paths() -> None:
@@ -495,33 +583,32 @@ def test_proxy_scalar_guards_and_unavailable_paths() -> None:
     assert np.isnan(_proxy._correlation(np.ones(3), np.ones(4)))
     assert np.isnan(_proxy._correlation(np.array([1.0, np.nan, 3.0]), np.arange(3.0)))
     assert np.isnan(_proxy._correlation(np.ones(3), np.arange(3.0)))
-    assert _proxy._robust_scale(np.ones(4)) > 0.0
 
     index = pd.date_range("2025-01-01", periods=5, freq="h", tz="UTC")
     prepared = SimpleNamespace(timestamps=index)
     plan = _types._DiagnosticPlan((np.ones(5, dtype=bool),), np.ones(5, dtype=bool))
     result = SimpleNamespace(filtered_means=np.zeros((5, 3)))
     metrics = _proxy._proxy_metrics(
-        result, prepared, None, BayesianTuningSettings(), plan
+        result, prepared, None, NoiseTuningSettings(), plan
     )
-    assert metrics["proxy_gate_passed"] is True
+    assert metrics["proxy_check_passed"] is True
     metrics = _proxy._proxy_metrics(
         result,
         prepared,
         pd.Series([1.0] * 5, index=index),
-        BayesianTuningSettings(proxy_min_aligned_points=3),
+        NoiseTuningSettings(proxy_min_aligned_points=3),
         plan,
     )
-    assert metrics["proxy_gate_passed"] is False
+    assert metrics["proxy_check_passed"] is False
 
     with pytest.raises(TypeError, match="pandas Series"):
-        _proxy._proxy_metrics(result, prepared, [1.0], BayesianTuningSettings(), plan)  # type: ignore[arg-type]
+        _proxy._proxy_metrics(result, prepared, [1.0], NoiseTuningSettings(), plan)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="DatetimeIndex"):
         _proxy._proxy_metrics(
             result,
             prepared,
             pd.Series([1.0] * 5, index=range(5)),
-            BayesianTuningSettings(),
+            NoiseTuningSettings(),
             plan,
         )
     with pytest.raises(ValueError, match="timezone-aware"):
@@ -529,17 +616,17 @@ def test_proxy_scalar_guards_and_unavailable_paths() -> None:
             result,
             prepared,
             pd.Series([1.0] * 5, index=index.tz_localize(None)),
-            BayesianTuningSettings(),
+            NoiseTuningSettings(),
             plan,
         )
     metrics = _proxy._proxy_metrics(
         None,
         prepared,
         pd.Series([1.0] * 5, index=index),
-        BayesianTuningSettings(),
+        NoiseTuningSettings(),
         plan,
     )
-    assert metrics["proxy_gate_passed"] is False
+    assert metrics["proxy_check_passed"] is False
 
 
 def test_proxy_lag_search_covers_sparse_and_flat_pairs() -> None:
@@ -551,7 +638,7 @@ def test_proxy_lag_search_covers_sparse_and_flat_pairs() -> None:
     result = SimpleNamespace(
         filtered_means=np.column_stack((np.zeros(5), estimate, np.zeros(5)))
     )
-    options = BayesianTuningSettings(
+    options = NoiseTuningSettings(
         proxy_min_aligned_points=3,
         proxy_max_lag=timedelta(hours=1),
         proxy_diagnostic_frequency="1h",
@@ -563,20 +650,20 @@ def test_proxy_lag_search_covers_sparse_and_flat_pairs() -> None:
     assert metrics["proxy_shape_correlation"] == pytest.approx(1.0)
     assert metrics["proxy_change_correlation"] == 0.0
     assert metrics["proxy_best_lag_seconds"] == 0.0
-    assert metrics["proxy_gate_passed"] is False
+    assert metrics["proxy_check_passed"] is False
 
     flat = np.ones(5)
     metrics = _proxy._proxy_metrics(
         SimpleNamespace(filtered_means=np.column_stack((flat, flat, flat))),
         prepared,
         pd.Series(flat, index=index),
-        BayesianTuningSettings(
+        NoiseTuningSettings(
             proxy_min_aligned_points=3,
             proxy_max_lag=timedelta(0),
         ),
         plan,
     )
-    assert metrics["proxy_gate_passed"] is False
+    assert metrics["proxy_check_passed"] is False
 
     sparse_proxy = pd.Series(
         [1.0, 2.0, np.nan, np.nan, np.nan], index=index
@@ -590,11 +677,11 @@ def test_proxy_lag_search_covers_sparse_and_flat_pairs() -> None:
         sparse_result,
         prepared,
         sparse_proxy,
-        BayesianTuningSettings(proxy_min_aligned_points=3),
+        NoiseTuningSettings(proxy_min_aligned_points=3),
         plan,
     )
     assert sparse_metrics["proxy_aligned_count"] == 2
-    assert sparse_metrics["proxy_gate_passed"] is False
+    assert sparse_metrics["proxy_check_passed"] is False
 
 
 def test_proxy_alignment_length_guard(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -616,7 +703,7 @@ def test_proxy_alignment_length_guard(monkeypatch: pytest.MonkeyPatch) -> None:
             result,
             prepared,
             pd.Series([1.0, 2.0, 3.0], index=index, name="proxy"),
-            BayesianTuningSettings(),
+            NoiseTuningSettings(),
             plan,
         )
 
@@ -655,8 +742,8 @@ def test_proxy_lag_search_skips_malformed_slices(
         result,
         prepared,
         pd.Series([1.0, 2.0, 3.0], index=index, name="proxy"),
-        BayesianTuningSettings(proxy_min_aligned_points=3, proxy_max_lag=timedelta(0)),
+        NoiseTuningSettings(proxy_min_aligned_points=3, proxy_max_lag=timedelta(0)),
         plan,
     )
-    assert metrics["proxy_gate_passed"] is False
+    assert metrics["proxy_check_passed"] is False
     assert np.isnan(metrics["proxy_shape_correlation"])

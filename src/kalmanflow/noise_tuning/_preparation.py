@@ -9,8 +9,8 @@ from ..models import ReservoirStateSpaceModel
 from ..reservoir_config import ReservoirConfig
 from ..time_utils import validate_timestamp_precision
 from ._types import (
-    BayesianEvaluationSettings,
-    BayesianTuningError,
+    NoiseEvaluationSettings,
+    NoiseTuningError,
     ValidationWindow,
     _DiagnosticPlan,
     _Prepared,
@@ -131,11 +131,11 @@ def _prepare(
     p0 = np.asarray(config.p0, dtype=float)
     if not _is_diagonal(q) or not _is_diagonal(r) or not _is_diagonal(p0):
         raise ValueError(
-            "Bayesian evaluation requires constant diagonal q, r, and p0 matrices"
+            "noise evaluation requires constant diagonal q, r, and p0 matrices"
         )
     finite_storage = np.flatnonzero(np.isfinite(storage_values))
     if len(finite_storage) < 2:
-        raise BayesianTuningError(
+        raise NoiseTuningError(
             "at least two finite storage observations are required"
         )
     first, second = int(finite_storage[0]), int(finite_storage[1])
@@ -175,7 +175,7 @@ def _prepare(
         dtype=float,
     )
     if not np.all(np.isfinite(initial_mean)):
-        raise BayesianTuningError("initial state is not finite")
+        raise NoiseTuningError("initial state is not finite")
     return _Prepared(
         index=index,
         timestamps=timestamps,
@@ -197,7 +197,7 @@ def _prepare(
 def _diagnostic_plan(
     prepared: _Prepared,
     windows: Sequence[ValidationWindow],
-    settings: BayesianEvaluationSettings,
+    settings: NoiseEvaluationSettings,
 ) -> _DiagnosticPlan:
     timestamps = prepared.timestamps
     window_masks = tuple(window.mask(timestamps) for window in windows)

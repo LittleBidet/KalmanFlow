@@ -97,31 +97,32 @@ matrix. All covariance inputs must be finite, symmetric, and positive
 semidefinite; `r` must have a strictly positive diagonal. See
 [configuration](CONFIGURATION.md) for a complete example.
 
-## Bayesian noise evaluation and tuning
+## Noise evaluation and tuning
 
-The Bayesian search API is **experimental** and requires
+The tuning API is **experimental** and requires
 `pip install "kalmanflow[tuning]"`. Its API, selection rules, and result schema may
 change between releases. Review and independently validate any proposed
 configuration. `evaluate_configuration` is available with the base installation;
-the SciPy/scikit-learn optimizer dependencies load only when search is invoked.
+SciPy loads only when a search is invoked.
 
 | Export | Purpose |
 | --- | --- |
 | `ValidationWindow(name, start, end, weight=None)` | Named, timezone-aware half-open interval `[start, end)` for causal scoring. Window boundaries may use nanosecond precision even though scored observation timestamps are limited to microseconds. |
-| `BayesianEvaluationSettings` | Shared warmup, innovation, calibration-warning, and numerical-stability settings. |
-| `BayesianTuningSettings` | Trial counts, covariance multiplier bounds, acquisition settings, and optional upstream-proxy shape/timing gate. |
-| `tune_inflow_noise_bayesian(...)` | Proposes five diagonal `q`/`r` terms from causal innovation scores. It needs at least three windows and a new proposed configuration version. |
-| `BayesianTuningResult` | Proposed `selected_config`, parameters, trial summary, selected-window diagnostics, optional proxy diagnostics, warnings, and timing. |
+| `NoiseEvaluationSettings` | Shared warmup, innovation, calibration-warning, and numerical-stability settings. |
+| `NoiseTuningSettings` | Covariance multiplier bounds, local-search budget, identifiability check, and optional upstream-proxy thresholds. |
+| `tune_inflow_noise(...)` | Proposes five diagonal `q`/`r` terms by maximizing the causal innovation likelihood. It needs at least three windows and a new proposed configuration version. An optional `progress` callback receives updates during the run. |
+| `estimate_storage_noise(storage, validation_windows=None)` | Estimates storage reading noise (`r_storage`) per window and pooled, as the median of weekly lag-1 autocovariance estimates of storage changes. Use it to spot periods with different noise before tuning. |
+| `NoiseTuningProgress` | One progress update: phase and its number out of the phase count, filtering passes in that phase and their limit, best objective so far, and elapsed seconds. |
+| `NoiseTuningResult` | Proposed `selected_config` and parameters, objective versus the base configuration, per-candidate and per-window diagnostics, identifiability, the storage-noise estimates, optional proxy diagnostics, warnings, and timing. |
 | `evaluate_configuration(...)` | Scores one already-frozen configuration without searching or modifying it. |
 | `ConfigEvaluationResult` | Frozen configuration, compact candidate summary, window diagnostics, and warnings. |
-| `BayesianTuningError` | Raised when no candidate meets the tuning workflow's hard requirements. |
+| `NoiseTuningError` | Raised when no local search meets the tuning workflow's hard requirements. |
 
 Tuning requires diagonal `q`, `r`, and `p0`, clean matched pandas series, at
-least three positive inflow-increment seeds, and at least three distinct,
-non-overlapping windows. Every seed is evaluated, so `total_trials` must be at
-least the number of seeds. An optional upstream series is a shape/timing
-diagnostic only, not a total-inflow label or Kalman observation. See
-[Bayesian noise tuning](BAYESIAN_NOISE_TUNING.md) for selection and report
+least one positive inflow-increment seed inside the `q_inflow` bounds, and at
+least three distinct, non-overlapping windows. An optional upstream series is
+a shape/timing diagnostic only, not a total-inflow label or Kalman
+observation. See [noise tuning](NOISE_TUNING.md) for selection and report
 details.
 
 ## Advanced state-space interfaces

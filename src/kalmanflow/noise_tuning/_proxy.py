@@ -5,7 +5,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ._types import BayesianTuningSettings
+from ._types import NoiseTuningSettings
 
 Array = np.ndarray
 
@@ -24,28 +24,20 @@ def _correlation(left: Array, right: Array) -> float:
     return float(np.corrcoef(left, right)[0, 1])
 
 
-def _robust_scale(values: Array) -> float:
-    values = np.asarray(values, dtype=float)
-    median = float(np.median(values))
-    mad = float(np.median(np.abs(values - median)))
-    if not np.isfinite(mad) or mad <= np.finfo(float).eps:
-        mad = float(np.std(values))
-    return max(mad, np.finfo(float).eps)
-
-
 def _proxy_metrics(
     result: Any,
     prepared: Any,
     upstream_proxy: pd.Series | None,
-    options: BayesianTuningSettings,
+    options: NoiseTuningSettings,
     diagnostic_plan: Any,
 ) -> dict[str, float | bool]:
     """Compare causal filtered inflow with an upstream proxy by shape only.
 
-    The proxy is aligned by timestamp and a bounded offline lag search is used
-    solely for diagnostics.  No proxy value enters the Kalman objective, and no
-    amplitude equality is assumed.  A positive lag means the proxy series is
-    shifted later relative to the causal estimate.
+    The proxy is aligned by timestamp and a bounded offline lag search picks
+    the shift with the best level and change correlations. Correlation is
+    scale-free, so no amplitude equality is assumed, and no proxy value enters
+    the Kalman objective. A positive lag means the proxy series is shifted
+    later relative to the causal estimate.
     """
 
     metrics: dict[str, float | bool] = {
@@ -54,15 +46,14 @@ def _proxy_metrics(
         "proxy_best_lag_seconds": np.nan,
         "proxy_shape_correlation": np.nan,
         "proxy_change_correlation": np.nan,
-        "proxy_shape_rmse": np.nan,
-        # Absence of an optional proxy must not invalidate Bayesian tuning.
-        "proxy_gate_passed": True,
+        # Without a proxy there is nothing to fail.
+        "proxy_check_passed": True,
     }
     if upstream_proxy is None:
         return metrics
     if result is None:
         metrics["proxy_available"] = True
-        metrics["proxy_gate_passed"] = False
+        metrics["proxy_check_passed"] = False
         return metrics
     if not isinstance(upstream_proxy, pd.Series):
         raise TypeError("upstream_proxy must be a pandas Series or None")
@@ -93,7 +84,7 @@ def _proxy_metrics(
     finite = np.isfinite(estimate) & np.isfinite(proxy_values)
     if int(finite.sum()) < options.proxy_min_aligned_points:
         metrics["proxy_aligned_count"] = int(finite.sum())
-        metrics["proxy_gate_passed"] = False
+        metrics["proxy_check_passed"] = False
         return metrics
     # The diagnostic is sampled on a fixed cadence, so only whole offsets that
     # remain inside the requested duration are valid.  In particular, a
@@ -103,7 +94,7 @@ def _proxy_metrics(
         pd.Timedelta(options.proxy_max_lag) // diagnostic_frequency
     )
     interval_seconds = diagnostic_frequency.total_seconds()
-    best: tuple[float, int, float, float, float] | None = None
+    best: tuple[float, int, float, float] | None = None
     for offset in range(-max_steps, max_steps + 1):
         if offset >= 0:
             end = len(estimate) - offset
@@ -131,26 +122,15 @@ def _proxy_metrics(
             continue
         if not np.isfinite(change_corr):
             change_corr = 0.0
-        estimate_scale = _robust_scale(estimate_pair)
-        proxy_scale = _robust_scale(proxy_pair)
-        estimate_z = (estimate_pair - np.median(estimate_pair)) / estimate_scale
-        proxy_z = (proxy_pair - np.median(proxy_pair)) / proxy_scale
-        shape_rmse = float(np.sqrt(np.mean((estimate_z - proxy_z) ** 2)))
         score = 0.6 * shape_corr + 0.4 * change_corr
-        candidate = (
-            score,
-            offset,
-            shape_corr,
-            change_corr,
-            shape_rmse,
-        )
+        candidate = (score, offset, shape_corr, change_corr)
         if best is None or candidate[0] > best[0]:
             best = candidate
     if best is None:
         metrics["proxy_aligned_count"] = int(finite.sum())
-        metrics["proxy_gate_passed"] = False
+        metrics["proxy_check_passed"] = False
         return metrics
-    _score, offset, shape_corr, change_corr, shape_rmse = best
+    _score, offset, shape_corr, change_corr = best
     metrics.update(
         {
             "proxy_aligned_count": int(finite.sum()),
@@ -160,12 +140,9 @@ def _proxy_metrics(
             "proxy_best_lag_seconds": float(-offset * interval_seconds),
             "proxy_shape_correlation": float(shape_corr),
             "proxy_change_correlation": float(change_corr),
-            "proxy_shape_rmse": float(shape_rmse),
-            "proxy_gate_passed": bool(
-                finite.sum() >= options.proxy_min_aligned_points
-                and shape_corr >= options.proxy_min_shape_correlation
+            "proxy_check_passed": bool(
+                shape_corr >= options.proxy_min_shape_correlation
                 and change_corr >= options.proxy_min_change_correlation
-                and shape_rmse <= options.proxy_max_shape_rmse
             ),
         }
     )
