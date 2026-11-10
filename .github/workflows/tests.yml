@@ -2,11 +2,20 @@ name: Tests
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.11.21"
 
 jobs:
   test:
@@ -19,14 +28,14 @@ jobs:
         python-version: ["3.12", "3.13", "3.14"]
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up uv and Python
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.11.21"
+          version: ${{ env.UV_VERSION }}
           python-version: ${{ matrix.python-version }}
 
       - name: Install test and tuning dependencies
@@ -38,11 +47,76 @@ jobs:
       - name: Run tests
         run: uv run --no-sync python -m pytest --cov --cov-report=term-missing
 
+  build:
+    name: Build and smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+
       - name: Build wheel and source distribution
         run: uv build --no-sources
 
-      - name: Verify wheel in a clean core-dependencies environment
+      - name: Check distribution metadata
+        run: uvx twine check --strict dist/*
+
+      - name: Check that the source distribution ships the documentation
+        run: tar -tzf dist/kalmanflow-*.tar.gz | grep "/Documentation/ARCHITECTURE.md$"
+
+      # Core dependencies only: the package must work without SciPy.
+      - name: Smoke test the wheel in a clean environment
         run: |
-          uv venv .wheel-smoke
-          uv pip install --python .wheel-smoke/bin/python dist/kalmanflow-*.whl
-          .wheel-smoke/bin/python -c "import kalmanflow; assert kalmanflow.__all__"
+          uv venv .smoke-wheel
+          uv pip install --python .smoke-wheel/bin/python dist/kalmanflow-*.whl
+          .smoke-wheel/bin/python -I .github/scripts/smoke_test.py
+
+      - name: Smoke test the source distribution in a clean environment
+        run: |
+          uv venv .smoke-sdist
+          uv pip install --python .smoke-sdist/bin/python dist/kalmanflow-*.tar.gz
+          .smoke-sdist/bin/python -I .github/scripts/smoke_test.py
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/kalmanflow-*
+          if-no-files-found: error
+          retention-days: 7
+
+  floor:
+    name: Lowest supported dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+
+      # `uv sync --resolution lowest-direct` would also resolve the unbounded
+      # notebook group to unbuildable releases, so install only what the tests
+      # need into a separate environment.
+      - name: Install the lowest allowed direct dependencies
+        run: |
+          uv venv .floor
+          uv pip install --python .floor/bin/python --resolution lowest-direct \
+            --editable ".[tuning]" --group dev
+
+      - name: Run tests
+        run: .floor/bin/python -m pytest --cov --cov-report=term-missing

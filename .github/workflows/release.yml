@@ -1,0 +1,183 @@
+name: Release
+
+# Pushing a tag `v<version>` runs the tests, publishes the built files to
+# TestPyPI, checks that upload, then waits for approval of the `pypi`
+# environment before publishing the same files to PyPI and creating the
+# GitHub release. Publishing uses PyPI Trusted Publishing: the publish jobs
+# must stay in this file, because PyPI matches on the workflow file name.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-tag:
+    name: Check tag against package version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require the tagged commit to be on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - name: Compare the tag with pyproject.toml
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'EOF'
+          import os
+          import re
+          import tomllib
+
+          with open("pyproject.toml", "rb") as handle:
+              version = tomllib.load(handle)["project"]["version"]
+          tag = os.environ["TAG"]
+          if tag != f"v{version}":
+              raise SystemExit(f"tag {tag} does not match package version {version}")
+          # PEP 440 alpha, beta, release-candidate and development versions.
+          prerelease = re.search(r"\d(a|b|rc)\d+|\.dev\d+", version) is not None
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"version={version}\n")
+              output.write(f"prerelease={str(prerelease).lower()}\n")
+          EOF
+
+  tests:
+    name: Tests
+    needs: verify-tag
+    uses: ./.github/workflows/tests.yml
+
+  testpypi:
+    name: Publish to TestPyPI
+    needs: [verify-tag, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/kalmanflow/${{ needs.verify-tag.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      # skip-existing lets a failed release be rerun after this step succeeded.
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  verify-testpypi:
+    name: Check the TestPyPI upload
+    needs: [verify-tag, testpypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.11.21"
+          python-version: "3.12"
+
+      - name: Download distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      # Dependencies come from PyPI through the built wheel; only kalmanflow
+      # itself is then replaced by the TestPyPI upload.
+      - name: Install kalmanflow from TestPyPI
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: |
+          uv venv .smoke-testpypi
+          uv pip install --python .smoke-testpypi/bin/python dist/kalmanflow-*.whl
+          uv pip uninstall --python .smoke-testpypi/bin/python kalmanflow
+          for attempt in 1 2 3 4 5 6; do
+            if uv pip install --python .smoke-testpypi/bin/python --no-deps --no-cache \
+                --index-url https://test.pypi.org/simple/ "kalmanflow==${VERSION}"; then
+              exit 0
+            fi
+            echo "TestPyPI does not list ${VERSION} yet (attempt ${attempt})"
+            sleep 20
+          done
+          exit 1
+
+      - name: Smoke test the TestPyPI install
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: |
+          .smoke-testpypi/bin/python -I .github/scripts/smoke_test.py \
+            --expect-version "$VERSION"
+
+  pypi:
+    name: Publish to PyPI
+    needs: [verify-tag, verify-testpypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/kalmanflow/${{ needs.verify-tag.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+  github-release:
+    name: Create GitHub release
+    needs: [verify-tag, pypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+          PRERELEASE: ${{ needs.verify-tag.outputs.prerelease }}
+        run: |
+          flags=(--verify-tag --generate-notes --title "KalmanFlow ${VERSION}")
+          if [ "$PRERELEASE" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$TAG" dist/kalmanflow-* "${flags[@]}"
