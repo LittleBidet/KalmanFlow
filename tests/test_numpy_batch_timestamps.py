@@ -246,7 +246,11 @@ def test_submicrosecond_pandas_lag_keeps_original_batch_release_boundary():
     assert output.revised_inflow.notna().tolist() == [True, False, False]
 
 
-@pytest.mark.parametrize("lag", [pd.Timedelta(10**15, unit="s"), pd.NaT])
+# Built from a NumPy value: pandas 3.1 no longer accepts a number and a unit
+# for a lag too large to hold in microseconds.
+@pytest.mark.parametrize(
+    "lag", [pd.Timedelta(np.timedelta64(10**15, "s")), pd.NaT]
+)
 def test_exceptional_pandas_lags_retain_original_comparison(lag):
     index = pd.date_range("2024-01-01", periods=4, freq="15min", tz="UTC")
     storage = pd.Series([100.0, 101.0, 102.0, 103.0], index=index)
