@@ -19,7 +19,7 @@ from ._reservoir_checkpoint import (
     decode_reservoir_checkpoint,
     encode_reservoir_checkpoint,
 )
-from ._validation import bounded_integer, measurement_value
+from ._validation import COVARIANCE_PSD_RTOL, bounded_integer, measurement_value
 from .flags import OutputFlag
 from .kalman import kalman_filter
 from .models import ReservoirStateSpaceModel
@@ -99,13 +99,7 @@ def _inflow_standard_deviation(
     array = np.asarray(covariance, dtype=float)
     if array.ndim != 2 or array.shape[0] <= 1 or array.shape[1] <= 1:
         raise ValueError(f"{name} must contain an inflow covariance entry")
-    if not np.isfinite(array).all():
-        raise ValueError(f"{name} must contain only finite values")
-    variance = float(array[1, 1])
-    tolerance = 1e-12 * max(1.0, abs(variance))
-    if variance < -tolerance:
-        raise ValueError(f"{name} has a materially negative inflow variance")
-    return math.sqrt(max(variance, 0.0))
+    return float(_inflow_standard_deviations(array[None], name=name)[0])
 
 
 def _inflow_standard_deviations(
@@ -121,7 +115,7 @@ def _inflow_standard_deviations(
     if not np.isfinite(array).all():
         raise ValueError(f"{name} must contain only finite values")
     variances = np.asarray(array[:, 1, 1], dtype=float)
-    tolerance = 1e-12 * np.maximum(1.0, np.abs(variances))
+    tolerance = COVARIANCE_PSD_RTOL * np.maximum(1.0, np.abs(variances))
     if np.any(variances < -tolerance):
         raise ValueError(f"{name} has a materially negative inflow variance")
     return np.sqrt(np.maximum(variances, 0.0))
