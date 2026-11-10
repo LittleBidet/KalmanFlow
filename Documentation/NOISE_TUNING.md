@@ -72,8 +72,9 @@ Each seed gives one starting point: the base configuration's terms with
 `q_inflow` set from the seed. All starts are scored, and the best
 `local_searches` of them are refined with bounded L-BFGS-B in log-parameter
 space, each with at most `max_evaluations_per_search` objective evaluations.
-The valid local optimum with the lowest objective is proposed. Results are
-deterministic.
+The valid local optimum with the lowest objective is proposed, unless the
+base configuration scores lower: then the proposal keeps the base terms and
+a warning says so. Results are deterministic.
 
 Pass `progress=callback` to follow a long run. The callback receives a
 `NoiseTuningProgress` at the start of each phase (`screening`, `search-1` and

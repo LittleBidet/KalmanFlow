@@ -159,10 +159,14 @@ def test_identifiability_is_skipped_when_every_term_is_at_a_bound(
     def search_to_corner(
         objective: object, start: np.ndarray, max_evaluations: int
     ) -> _optimization._SearchOutcome:
-        return _optimization._SearchOutcome(np.ones(5), 1, True, "corner")
+        # The lower corner beats the base here, so it is selected.
+        return _optimization._SearchOutcome(np.zeros(5), 1, True, "corner")
 
     monkeypatch.setattr(_optimization, "_local_search", search_to_corner)
     result = tune_inflow_noise(**_tune_kwargs())  # type: ignore[arg-type]
+    assert result.candidate_summary.query("selected")["candidate"].item() == (
+        "search-1"
+    )
     assert result.identifiability.empty
     assert not any("identified" in warning for warning in result.warnings)
 

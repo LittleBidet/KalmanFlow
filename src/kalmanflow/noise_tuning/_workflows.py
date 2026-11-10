@@ -258,8 +258,10 @@ def tune_inflow_noise(
 
     Each inflow increment seed (an hourly standard deviation) gives one
     starting point. The best ``local_searches`` starts are refined with
-    bounded L-BFGS-B in log-parameter space, and the best valid optimum is
-    proposed. Requires the optional ``kalmanflow[tuning]`` dependencies.
+    bounded L-BFGS-B in log-parameter space. The valid optimum with the lowest
+    objective is proposed, unless the base configuration scores lower, in
+    which case the base terms are kept and a warning says so. Requires the
+    optional ``kalmanflow[tuning]`` dependencies.
     Calibration, identifiability, and upstream-proxy checks are reported as
     warnings and never change the selection. Proposals require independent
     validation before operational use.
@@ -328,7 +330,11 @@ def tune_inflow_noise(
     )
     improvement, improvement_error = _improvement_over_base(objective, base, selected)
     warnings = [
-        *_improvement_warnings(improvement, improvement_error, options),
+        *(
+            _improvement_warnings(improvement, improvement_error, options)
+            if selected is not base
+            else []
+        ),
         *_selection_warnings(selected, space, len(windows)),
         *(
             f"calibration: {warning}"
@@ -432,20 +438,29 @@ def _search(
 
 
 def _select(candidates: Sequence[_Candidate], objective: _Objective) -> _Candidate:
-    """Return the valid local optimum with the lowest objective."""
+    """Return the valid candidate with the lowest objective.
 
-    optima = [
+    The base configuration competes with the local optima, so a search that
+    stops early at worse settings never replaces it. A tie keeps the optimum.
+    """
+
+    valid = [
         candidate
         for candidate in candidates
-        if candidate.search is not None
-        and np.isfinite(objective.score(candidate.result))
+        if np.isfinite(objective.score(candidate.result))
     ]
-    if not optima:
+    if not valid:
         raise NoiseTuningError(
-            "no local search reached noise settings that pass the hard "
-            "validity checks"
+            "neither the base configuration nor any local search reached noise "
+            "settings that pass the hard validity checks"
         )
-    return min(optima, key=lambda candidate: objective.score(candidate.result))
+    return min(
+        valid,
+        key=lambda candidate: (
+            objective.score(candidate.result),
+            candidate.search is None,
+        ),
+    )
 
 
 def _check_identifiability(
@@ -535,16 +550,23 @@ def _selection_warnings(
     selected: _Candidate, space: _ParameterSpace, window_count: int
 ) -> list[str]:
     warnings = []
-    if not selected.search.converged:
+    if selected.search is None:
         warnings.append(
-            f"the selected local search did not converge: {selected.search.message}"
+            "no local search scored better than the base configuration, so the "
+            "proposal keeps the base noise terms"
         )
-    at_bounds = space.names_at_bounds(selected.parameters)
-    if at_bounds:
-        warnings.append(
-            f"selected {', '.join(at_bounds)} at the edge of the search bounds; "
-            "the likelihood optimum may lie outside them"
-        )
+    else:
+        if not selected.search.converged:
+            warnings.append(
+                "the selected local search did not converge: "
+                f"{selected.search.message}"
+            )
+        at_bounds = space.names_at_bounds(selected.parameters)
+        if at_bounds:
+            warnings.append(
+                f"selected {', '.join(at_bounds)} at the edge of the search "
+                "bounds; the likelihood optimum may lie outside them"
+            )
     if window_count < 5:
         warnings.append(
             "fewer than five validation windows are available; uncertainty is weak"

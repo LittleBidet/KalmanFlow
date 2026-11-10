@@ -495,8 +495,46 @@ def test_all_failed_evaluations_raise_noise_tuning_error(
         raise np.linalg.LinAlgError("injected numerical failure")
 
     monkeypatch.setattr(_candidate, "kalman_filter", fail_all)
-    with pytest.raises(NoiseTuningError, match="no local search reached"):
+    with pytest.raises(NoiseTuningError, match="nor any local search reached"):
         _tune(storage, discharge, windows)
+
+
+def test_base_is_kept_when_every_search_stops_at_worse_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kalmanflow.noise_tuning import _optimization
+
+    storage, discharge, windows = _inputs()
+
+    def stop_at_upper_corner(objective, start, max_evaluations):
+        # Every term on its upper bound scores far worse than the base here.
+        return _optimization._SearchOutcome(
+            point=np.ones(len(start)),
+            evaluations=1,
+            converged=False,
+            message="evaluation budget reached",
+        )
+
+    monkeypatch.setattr(_optimization, "_local_search", stop_at_upper_corner)
+    result = _tune(storage, discharge, windows)
+    summary = result.candidate_summary.set_index("candidate")
+    searched = summary.loc[["search-1", "search-2"], "objective"]
+    assert (searched > summary.loc["base", "objective"]).all()
+    assert summary.loc["base", "selected"]
+    assert result.selected_objective == result.base_objective
+    assert result.selected_parameters == {
+        "q_storage": 0.002,
+        "q_inflow": 1.0,
+        "q_outflow": 0.02,
+        "r_storage": 0.25,
+        "r_outflow": 4.0,
+    }
+    assert result.selected_config.metadata["selection"]["selected_candidate"] == (
+        "base"
+    )
+    assert any("keeps the base noise terms" in w for w in result.warnings)
+    assert not any("did not converge" in w for w in result.warnings)
+    assert not any("not clearly better" in w for w in result.warnings)
 
 
 def test_search_is_reproducible() -> None:
