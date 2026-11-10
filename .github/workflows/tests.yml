@@ -10,8 +10,10 @@ on:
 permissions:
   contents: read
 
+# The literal prefix keeps this group apart from the release workflow's own
+# group when that workflow calls this one.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
