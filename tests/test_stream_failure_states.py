@@ -370,3 +370,18 @@ def test_missing_storage_while_waiting_for_second_advances_the_cursor() -> None:
     )
     assert pipeline.initialized
     assert pipeline.latest_filter_step is update.filtered_states[-1]
+
+
+def test_constructor_and_from_config_set_the_same_fields() -> None:
+    config = _config()
+    direct = OnlineReservoirInflow(
+        q_storage=0.1,
+        q_inflow=0.2,
+        q_outflow=0.3,
+        r_storage=0.25,
+        r_outflow=0.5,
+        smoothing_lag=config.smoothing_lag,
+        reservoir_id=config.reservoir_id,
+    )
+    configured = OnlineReservoirInflow.from_config(config)
+    assert set(vars(direct)) == set(vars(configured))

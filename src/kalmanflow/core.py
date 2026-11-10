@@ -231,6 +231,45 @@ class OnlineReservoirInflow:
             r_outflow=r_outflow,
             unit_system=unit_system,
         )
+        self._initialize(
+            backend,
+            smoothing_lag=smoothing_lag,
+            max_window_steps=max_window_steps,
+            reservoir_id=reservoir_id,
+            include_uncertainty=include_uncertainty,
+        )
+
+    @classmethod
+    def from_config(
+        cls,
+        config: ReservoirConfig,
+        *,
+        max_window_steps: int = 100_000,
+        include_uncertainty: bool = False,
+    ) -> OnlineReservoirInflow:
+        """Create an estimator from a validated reservoir configuration."""
+
+        instance = cls.__new__(cls)
+        instance._initialize(
+            _build_configured_backend(config),
+            smoothing_lag=config.smoothing_lag,
+            max_window_steps=max_window_steps,
+            reservoir_id=config.reservoir_id,
+            include_uncertainty=include_uncertainty,
+        )
+        return instance
+
+    def _initialize(
+        self,
+        backend: ReservoirBackend,
+        *,
+        smoothing_lag: timedelta,
+        max_window_steps: int,
+        reservoir_id: str | None,
+        include_uncertainty: bool,
+    ) -> None:
+        """Set every instance field; shared by ``__init__`` and ``from_config``."""
+
         self._pipeline = _build_pipeline(
             backend,
             smoothing_lag=smoothing_lag,
@@ -245,34 +284,6 @@ class OnlineReservoirInflow:
             include_uncertainty
         )
         self._status = _StreamStatus.AWAITING_SUCCESS
-
-    @classmethod
-    def from_config(
-        cls,
-        config: ReservoirConfig,
-        *,
-        max_window_steps: int = 100_000,
-        include_uncertainty: bool = False,
-    ) -> OnlineReservoirInflow:
-        """Create an estimator from a validated reservoir configuration."""
-
-        instance = cls.__new__(cls)
-        backend = _build_configured_backend(config)
-        instance._pipeline = _build_pipeline(
-            backend,
-            smoothing_lag=config.smoothing_lag,
-            max_window_steps=max_window_steps,
-        )
-        instance._configuration_fingerprint = _configuration_fingerprint(
-            backend,
-            config.smoothing_lag,
-        )
-        instance._reservoir_id = config.reservoir_id
-        instance._include_uncertainty = _validate_include_uncertainty(
-            include_uncertainty
-        )
-        instance._status = _StreamStatus.AWAITING_SUCCESS
-        return instance
 
     @classmethod
     def from_checkpoint(
