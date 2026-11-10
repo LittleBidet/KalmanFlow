@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -223,6 +224,50 @@ def test_process_many_rollback_keeps_stream_usable() -> None:
     assert not stream.failed
     stream.process_many(observations[1:])
     assert stream.checkpoint()
+
+
+def test_out_of_order_group_is_rejected_without_a_rollback_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = OnlineReservoirInflow.from_config(_config())
+    observations = _observations(4)
+    stream.process_many(observations[:3])
+    restores = 0
+    real_restore = stream._pipeline.restore_state
+
+    def counting_restore(state):
+        nonlocal restores
+        restores += 1
+        return real_restore(state)
+
+    monkeypatch.setattr(stream._pipeline, "restore_state", counting_restore)
+    with pytest.raises(ValueError, match="strictly increasing"):
+        stream.process_many((observations[3], observations[0]))
+    assert restores == 0
+    assert not stream.failed
+    with pytest.raises(RuntimeError, match="before a successful process"):
+        stream.checkpoint()
+    stream.process_many(observations[3:])
+    assert stream.checkpoint()
+
+
+def test_group_that_fails_mid_way_rolls_back_to_its_entry_state() -> None:
+    # A one-day lag finalizes nothing within these 15-minute steps, so a
+    # three-step window overflows on the group's second observation.
+    config = replace(_config(), smoothing_lag=timedelta(days=1))
+    stream = OnlineReservoirInflow.from_config(config, max_window_steps=3)
+    observations = _observations(5)
+    stream.process(observations[0])
+    stream.process(observations[1])
+    entry = stream.checkpoint()
+
+    with pytest.raises(OverflowError, match="max_window_steps"):
+        stream.process_many(observations[2:4])
+
+    assert not stream.failed
+    assert stream._pipeline.export_state() == OnlineReservoirInflow.from_checkpoint(
+        entry, config=config, max_window_steps=3
+    )._pipeline.export_state()
 
 
 def test_pipeline_rejected_step_before_acceptance_changes_nothing() -> None:

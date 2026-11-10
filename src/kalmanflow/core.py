@@ -414,9 +414,11 @@ class OnlineReservoirInflow:
         # Nothing has changed until the entry snapshot exists.
         outcome = _StreamStatus.AWAITING_SUCCESS
         try:
+            # An out-of-order group is rejected before the snapshot, so it
+            # never pays for a rollback replay of the active window.
+            self._validate_complete_order(values)
             entry_state = self._pipeline.export_state()
             try:
-                self._validate_complete_order(values)
                 updates = tuple(
                     self._to_public_update(
                         self._pipeline.process(
