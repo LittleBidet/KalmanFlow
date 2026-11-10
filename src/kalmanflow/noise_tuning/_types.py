@@ -145,10 +145,11 @@ class NoiseTuningSettings:
     """Search bounds, search budget, and optional proxy-check thresholds.
 
     Each ``*_multiplier_bounds`` pair is applied to the matching diagonal
-    term of the base configuration. Storage noise is capped at its reviewed
-    base value by default: the innovation likelihood alone cannot tell a rapid
-    inflow event from an over-dispersed storage channel. Callers with
-    independent evidence may widen those bounds explicitly.
+    term of the base configuration. Storage process noise (``q_storage``) is
+    capped at its reviewed base value by default: the innovation likelihood
+    alone cannot tell a rapid inflow event from an over-dispersed storage
+    channel. Callers with independent evidence may widen those bounds
+    explicitly.
 
     With ``estimate_r_storage`` (the default), ``r_storage`` is instead
     searched between ``estimate / r_storage_estimate_factor`` and
