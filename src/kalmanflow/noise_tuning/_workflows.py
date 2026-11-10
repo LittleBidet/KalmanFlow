@@ -18,7 +18,7 @@ from . import (
     _proxy,
     _storage_noise,
 )
-from ._parameters import _ParameterSpace
+from ._parameters import _base_parameters, _ParameterSpace
 from ._types import (
     _PARAMETER_NAMES,
     ConfigEvaluationResult,
@@ -719,10 +719,10 @@ def evaluate_configuration(
             prepared.index[-1] + pd.Timedelta(nanoseconds=1),
         )
     windows = _preparation._validate_windows((evaluation_window,))
-    q_inflow = float(config.q[1, 1])
+    terms = _base_parameters(config)
     candidate = _candidate._evaluate_candidate(
         prepared,
-        q_inflow=q_inflow,
+        q_inflow=terms["q_inflow"],
         windows=windows,
         settings=options,
         plan=_preparation._diagnostic_plan(prepared, windows, options),
@@ -745,11 +745,7 @@ def evaluate_configuration(
     summary = pd.DataFrame(
         [
             {
-                "q_storage": float(config.q[0, 0]),
-                "q_inflow": q_inflow,
-                "q_outflow": float(config.q[2, 2]),
-                "r_storage": float(config.r[0, 0]),
-                "r_outflow": float(config.r[1, 1]),
+                **terms,
                 "eligible": eligible,
                 "calibrated": eligible and not calibration_warnings,
                 "rejection_reasons": "; ".join(validity_reasons),

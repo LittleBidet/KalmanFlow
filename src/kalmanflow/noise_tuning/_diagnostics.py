@@ -446,7 +446,6 @@ def _paired_standard_error(
     weights: Array,
     settings: NoiseEvaluationSettings,
 ) -> float:
-    mean = float(np.dot(weights, differences))
     if len(differences) >= 5 and settings.bootstrap_samples > 1:
         rng = np.random.default_rng(settings.random_seed)
         samples = rng.choice(
@@ -458,12 +457,7 @@ def _paired_standard_error(
             weights[samples], axis=1
         )
         return float(np.std(values, ddof=1))
-    sum_squared_weights = float(np.sum(weights * weights))
-    denominator = 1.0 - sum_squared_weights
-    if denominator <= 0.0:
-        return 0.0
-    unbiased_variance = float(np.dot(weights, (differences - mean) ** 2) / denominator)
-    return sqrt(max(0.0, unbiased_variance * sum_squared_weights))
+    return _analytic_standard_error(differences, weights)
 
 
 def _weighted_standard_error(values: Array, weights: Array) -> float:
@@ -472,9 +466,16 @@ def _weighted_standard_error(values: Array, weights: Array) -> float:
     finite = np.isfinite(values)
     if finite.sum() < 2:
         return 0.0
-    values = values[finite]
     weights = np.asarray(weights, dtype=float)[finite]
-    weights = weights / weights.sum()
+    return _analytic_standard_error(values[finite], weights / weights.sum())
+
+
+def _analytic_standard_error(values: Array, weights: Array) -> float:
+    """Standard error of the weighted mean of ``values``; ``weights`` sum to 1.
+
+    Uses the unbiased weighted variance, which needs ``sum(weights**2) < 1``.
+    """
+
     sum_squared_weights = float(np.sum(weights * weights))
     denominator = 1.0 - sum_squared_weights
     if denominator <= 0.0:
