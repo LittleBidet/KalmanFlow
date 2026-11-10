@@ -399,6 +399,39 @@ def test_maximum_likelihood_recovers_identifiable_synthetic_noise_terms() -> Non
     assert any("poorly identified" in warning for warning in result.warnings)
 
 
+def test_identifiability_does_not_depend_on_window_weights() -> None:
+    from kalmanflow.noise_tuning import _parameters, _preparation, _workflows
+
+    storage, discharge, _ = _inputs(40)
+    index = storage.index
+    settings, tuning = _settings()
+    config = _config()
+    prepared = _prepare(storage, discharge, config)
+    space = _parameters._ParameterSpace.from_settings(config, tuning)
+    errors = []
+    # Two short windows and one long one, weighted equally and then not.
+    for weights in ((1.0, 1.0, 1.0), (1.0, 1.0, 4.0)):
+        windows = _validate_windows(
+            tuple(
+                ValidationWindow(f"w{i}", index[a], index[b], weight=weight)
+                for i, ((a, b), weight) in enumerate(
+                    zip(((2, 8), (8, 14), (14, 38)), weights, strict=True)
+                )
+            )
+        )
+        plan = _preparation._diagnostic_plan(prepared, windows, settings)
+        objective = _workflows._Objective(
+            prepared, windows, settings, plan, _workflows._ProgressReporter(None, 1)
+        )
+        selected = _workflows._Candidate(
+            "search-1", dict(space.base), objective.evaluate(space.base)
+        )
+        frame, _ = _workflows._check_identifiability(objective, space, selected)
+        errors.append(frame["log_standard_error"].to_numpy())
+    assert len(errors[0]) == 3
+    np.testing.assert_allclose(errors[0], errors[1], rtol=1e-9)
+
+
 def test_inflow_seeds_must_lie_inside_q_inflow_bounds() -> None:
     storage, discharge, windows = _inputs()
     with pytest.raises(ValueError, match="inside q_inflow_multiplier_bounds"):

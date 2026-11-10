@@ -125,8 +125,9 @@ Diagnostics never change the selection. The result reports:
   serially correlated innovation sequence fails these checks at any noise
   setting, which points at the model structure rather than the tuning.
 * **Identifiability.** For each selected term not on a bound: the curvature
-  of the objective in log space, an approximate standard error of the log
-  value, and the correlations implied by the inverse Hessian. Terms
+  of the total negative log-likelihood in log space, an approximate standard
+  error of the log value, and the correlations implied by the inverse
+  Hessian. Window weights and sizes do not change these figures. Terms
   uncertain by more than a factor of e, and pairs correlated beyond ±0.95,
   are named in warnings, and so is a term whose curvature could not be
   measured because a nearby step failed the validity checks; its standard

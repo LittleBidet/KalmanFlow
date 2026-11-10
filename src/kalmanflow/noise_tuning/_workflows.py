@@ -152,9 +152,10 @@ class _Objective:
 
     This is the negative log-likelihood of the validation-window innovations
     per observed component, so minimizing it is maximum-likelihood
-    estimation. Scores are cached, so finite-difference steps and the
-    identifiability check never refilter the same parameters. A parameter set
-    that fails the hard validity checks scores ``inf``.
+    estimation. Scores and total negative log-likelihoods are cached, so
+    finite-difference steps and the identifiability check never refilter the
+    same parameters. A parameter set that fails the hard validity checks
+    scores ``inf``.
     """
 
     def __init__(
@@ -172,6 +173,7 @@ class _Objective:
         self.weights = _preparation._window_weights(windows)
         self.progress = progress
         self._scores: dict[tuple[float, ...], float] = {}
+        self._totals: dict[tuple[float, ...], float] = {}
 
     def evaluate(self, parameters: Mapping[str, float]) -> _Pass:
         """Run one causal filtering pass and keep its full diagnostics."""
@@ -198,23 +200,39 @@ class _Objective:
             dtype=float,
         )
 
-    def scored_components(self, candidate: _Pass) -> int:
-        return sum(
-            int(candidate.window_rows[window.name]["joint_count"])
-            for window in self.windows
-        )
-
     def score(self, candidate: _Pass) -> float:
         valid, _ = _hard_validity(candidate, self.windows, self.settings)
         if not valid:
             return np.inf
         return float(np.dot(self.weights, self.window_losses(candidate)))
 
+    def total_negative_log_likelihood(self, candidate: _Pass) -> float:
+        """Sum the joint NLPD over every scored component, ignoring weights."""
+
+        if not np.isfinite(self.score(candidate)):
+            return np.inf
+        return float(
+            sum(
+                float(row["joint_nlpd"]) * int(row["joint_count"])
+                for row in (candidate.window_rows[w.name] for w in self.windows)
+            )
+        )
+
     def __call__(self, parameters: Mapping[str, float]) -> float:
+        return self._scores[self._cached(parameters)]
+
+    def total(self, parameters: Mapping[str, float]) -> float:
+        """Return the cached total negative log-likelihood of ``parameters``."""
+
+        return self._totals[self._cached(parameters)]
+
+    def _cached(self, parameters: Mapping[str, float]) -> tuple[float, ...]:
         key = tuple(float(parameters[name]) for name in _PARAMETER_NAMES)
         if key not in self._scores:
-            self._scores[key] = self.score(self.evaluate(parameters))
-        return self._scores[key]
+            result = self.evaluate(parameters)
+            self._scores[key] = self.score(result)
+            self._totals[key] = self.total_negative_log_likelihood(result)
+        return key
 
 
 @dataclass(frozen=True)
@@ -472,10 +490,10 @@ def _check_identifiability(
         return pd.DataFrame(), []
     # A central-difference Hessian over n terms needs 2n² points plus the center.
     objective.progress.start_phase("identifiability", 2 * len(free) ** 2 + 1)
-    hessian = _identifiability._log_space_hessian(objective, selected.parameters, free)
-    return _identifiability._identifiability_report(
-        hessian, free, objective.scored_components(selected.result)
+    hessian = _identifiability._log_space_hessian(
+        objective.total, selected.parameters, free
     )
+    return _identifiability._identifiability_report(hessian, free)
 
 
 def _candidate_row(

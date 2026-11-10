@@ -417,13 +417,13 @@ def test_parameter_space_round_trips_and_reports_bounds() -> None:
 def test_identifiability_report_flags_confounded_and_flat_terms() -> None:
     names = ["q_storage", "q_inflow"]
     ridge = np.array([[1.0, 0.99], [0.99, 1.0]])
-    frame, warnings = _identifiability._identifiability_report(ridge, names, 10_000)
+    frame, warnings = _identifiability._identifiability_report(ridge * 10_000, names)
     assert frame.loc["q_storage", "q_inflow"] == pytest.approx(-0.99)
     assert frame.loc["q_storage", "log_standard_error"] < 1.0
     assert any("strongly confounded" in warning for warning in warnings)
 
     flat = np.array([[1.0, 0.0], [0.0, 0.0]])
-    frame, warnings = _identifiability._identifiability_report(flat, names, 100)
+    frame, warnings = _identifiability._identifiability_report(flat * 100, names)
     assert np.isinf(frame.loc["q_inflow", "log_standard_error"])
     assert frame[names].isna().all().all()
     assert warnings[0].startswith("q_inflow are poorly identified")
@@ -433,8 +433,8 @@ def test_identifiability_report_flags_confounded_and_flat_terms() -> None:
 def test_identifiability_report_treats_infinite_curvature_as_unknown() -> None:
     # An invalid probe next to the optimum makes that diagonal entry +inf.
     names = ["q_inflow", "r_storage"]
-    hessian = np.array([[np.inf, 0.0], [0.0, 2.0]])
-    frame, warnings = _identifiability._identifiability_report(hessian, names, 100)
+    hessian = np.array([[np.inf, 0.0], [0.0, 200.0]])
+    frame, warnings = _identifiability._identifiability_report(hessian, names)
     assert np.isnan(frame.loc["q_inflow", "log_standard_error"])
     assert frame.loc["r_storage", "log_standard_error"] == pytest.approx(
         1.0 / np.sqrt(200.0)
