@@ -29,6 +29,7 @@ _MIN_PAIRS = 100
 _BLOCK_SECONDS = 7 * 86_400
 _MIN_BLOCK_PAIRS = 20
 _DISAGREEMENT_RATIO = 4.0
+_POOLED = "all"
 
 
 def estimate_storage_noise(
@@ -37,11 +38,12 @@ def estimate_storage_noise(
 ) -> pd.DataFrame:
     """Estimate storage reading noise (``r_storage``) from the data, per window.
 
-    Returns one row per window and a pooled ``"all"`` row, with the variance
-    estimate ``r_storage`` (squared storage units), ``reading_sd``, the number
-    of evenly spaced change ``pairs`` and week-long ``blocks`` used, and
-    ``unchanged_share``, the share of changes that are exactly zero (a sign
-    of held or quantized readings). Each estimate is the median of weekly
+    Returns one row per window and a pooled ``"all"`` row, so no window may
+    be named ``"all"``. Each row has the variance estimate ``r_storage``
+    (squared storage units), ``reading_sd``, the number of evenly spaced
+    change ``pairs`` and week-long ``blocks`` used, and ``unchanged_share``,
+    the share of changes that are exactly zero (a sign of held or quantized
+    readings). Each estimate is the median of weekly
     estimates and needs at least 100 pairs; fewer give NaN. Windows whose
     estimates differ by much more than a factor of 4 suggest a change in the
     gauge or its processing, and are better tuned separately.
@@ -69,6 +71,11 @@ def _storage_noise_frame(
 ) -> pd.DataFrame:
     """Build the per-window and pooled table over the ``allowed`` rows."""
 
+    if any(window.name == _POOLED for window in windows):
+        raise ValueError(
+            f"validation window name {_POOLED!r} is reserved for the pooled "
+            "storage-noise row"
+        )
     seconds = _timestamp_seconds(index)
     rows = []
     union = np.zeros(len(index), dtype=bool) if windows else allowed.copy()
@@ -78,7 +85,7 @@ def _storage_noise_frame(
         rows.append(_row(window.name, window.start, window.end, seconds, storage, mask))
     pooled = index[union]
     start, end = (pooled[0], pooled[-1]) if len(pooled) else (pd.NaT, pd.NaT)
-    rows.append(_row("all", start, end, seconds, storage, union))
+    rows.append(_row(_POOLED, start, end, seconds, storage, union))
     return pd.DataFrame(rows)
 
 
@@ -146,7 +153,7 @@ def _negative_lag1_covariance(later: Array, earlier: Array) -> float:
 def _pooled_estimate(frame: pd.DataFrame) -> float:
     if frame.empty:
         return np.nan
-    return float(frame.loc[frame["window"] == "all", "r_storage"].iloc[0])
+    return float(frame.loc[frame["window"] == _POOLED, "r_storage"].iloc[0])
 
 
 def _storage_noise_warnings(frame: pd.DataFrame) -> list[str]:
@@ -168,7 +175,7 @@ def _storage_noise_warnings(frame: pd.DataFrame) -> list[str]:
             "reading-noise signal (they were not negatively correlated), which "
             f"often happens when storm-driven changes dominate; {fallback}"
         )
-    windows = frame[(frame["window"] != "all") & np.isfinite(frame["r_storage"])]
+    windows = frame[(frame["window"] != _POOLED) & np.isfinite(frame["r_storage"])]
     zero = windows[windows["r_storage"] == 0.0]
     if len(zero):
         warnings.append(
