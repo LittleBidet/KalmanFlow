@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import cast
 
 import numpy as np
 
@@ -88,19 +89,11 @@ def _rts_smooth_arrays(
         if gains is None
         else gains
     )
-    if gains.shape != (n_times - 1, n_state, n_state):
-        raise ValueError("gains has an incompatible shape")
-
-    smoothed_means = np.empty_like(filtered_means)
+    smoothed_means = _rts_smooth_means(filtered_means, predicted_means, gains)
     smoothed_covariances = np.empty_like(filtered_covariances)
-    smoothed_means[-1] = filtered_means[-1]
     smoothed_covariances[-1] = filtered_covariances[-1]
-
     for k in range(n_times - 2, -1, -1):
         gain = gains[k]
-        smoothed_means[k] = filtered_means[k] + gain @ (
-            smoothed_means[k + 1] - predicted_means[k + 1]
-        )
         smoothed_covariances[k] = _symmetrize(
             filtered_covariances[k]
             + gain
@@ -114,7 +107,12 @@ def _rts_smooth_arrays(
 def _rts_smooth_means(
     filtered_means: Array, predicted_means: Array, gains: Array
 ) -> Array:
-    """Smooth a nonempty batch window without unused covariance recursion."""
+    """Run the RTS mean recursion over a nonempty window.
+
+    This is the only copy of the mean recursion: :func:`_rts_smooth_arrays`
+    calls it and adds the covariance recursion, and the batch path calls it
+    alone when uncertainty is not requested.
+    """
 
     n_times, n_state = filtered_means.shape
     if gains.shape != (max(n_times - 1, 0), n_state, n_state):
@@ -175,6 +173,36 @@ def _smooth_filter_steps(
     )
 
 
+def _release_count[Step](
+    active: Iterable[Step], lag_passed: Callable[[Step], bool]
+) -> int:
+    """Count the oldest active steps whose smoothing lag has passed.
+
+    This is the release rule shared by :class:`OnlineFixedLagRTS` and the
+    batch adapter; each supplies its own elapsed-time comparison. Active
+    steps are in time order, so the scan stops at the first one still
+    inside the lag.
+    """
+
+    count = 0
+    for candidate in active:
+        if not lag_passed(candidate):
+            break
+        count += 1
+    return count
+
+
+def _require_release_or_room(
+    released: int, active_count: int, max_window_steps: int
+) -> None:
+    """Reject a step that would grow a full window without releasing any."""
+
+    if released == 0 and active_count == max_window_steps:
+        raise OverflowError(
+            "active RTS window reached max_window_steps before a state finalized"
+        )
+
+
 class OnlineFixedLagRTS:
     """Keep recent filter steps until their smoothed results are ready.
 
@@ -213,8 +241,8 @@ class OnlineFixedLagRTS:
     def max_window_steps(self) -> int:
         """The maximum number of filter steps kept in memory."""
 
-        maxlen = self._steps.maxlen
-        return int(maxlen)
+        # The deque is always created with a maxlen.
+        return int(cast(int, self._steps.maxlen))
 
     @property
     def last_finalized_steps(self) -> tuple[FilterStep, ...]:
@@ -233,20 +261,17 @@ class OnlineFixedLagRTS:
         if self._steps and to_utc(step.timestamp) <= to_utc(self._steps[-1].timestamp):
             raise ValueError("filter-step timestamps must be strictly increasing")
         lag_seconds = self._lag.total_seconds()
-        eligible_count = 0
         # The new step has age zero and cannot finalize under a positive lag.
-        for active_step in self._steps:
-            if (
-                elapsed_seconds(step.timestamp, active_step.timestamp, allow_zero=True)
-                >= lag_seconds
-            ):
-                eligible_count += 1
-            else:
-                break
-        if eligible_count == 0 and len(self._steps) == self.max_window_steps:
-            raise OverflowError(
-                "active RTS window reached max_window_steps before a state finalized"
+        eligible_count = _release_count(
+            self._steps,
+            lambda active_step: elapsed_seconds(
+                step.timestamp, active_step.timestamp, allow_zero=True
             )
+            >= lag_seconds,
+        )
+        _require_release_or_room(
+            eligible_count, len(self._steps), self.max_window_steps
+        )
 
         # Compute before mutating either deque. A releasing full window needs
         # its complete gain sequence until smoothing has succeeded.
@@ -265,7 +290,8 @@ class OnlineFixedLagRTS:
             return ()
 
         active = (*self._steps, step)
-        gains = (*self._gains, gain)
+        # A releasing step always follows an active one, so its gain exists.
+        gains = (*self._gains, cast(Array, gain))
         smoothed = _smooth_filter_steps(active, gains=np.stack(gains))
         finalized = smoothed[:eligible_count]
         self._last_finalized_steps = active[:eligible_count]

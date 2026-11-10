@@ -327,6 +327,57 @@ def test_finished_phases_stay_complete_above_the_live_bars() -> None:
     assert stream.flushes == 3
 
 
+def test_a_failed_run_leaves_the_bars_stopped_instead_of_done() -> None:
+    stream = _FakeStream(interactive=True)
+    printer = run_noise_tuner._ProgressPrinter(stream)
+    printer(_update("search-1", 0, limit=201, number=2))
+    printer(_update("search-1", 3, limit=201, number=2))
+
+    printer.close(completed=False)
+    total, live = _screen(stream.getvalue())
+    assert total.endswith("stopped")
+    assert "100%" not in total
+    assert live.startswith("search-1") and "  3/201" in live
+    assert _bar(live) != "█" * 30
+    assert stream.getvalue().endswith("\n")
+
+
+def test_runner_stops_the_bars_when_tuning_raises(monkeypatch, tmp_path) -> None:
+    index = pd.date_range("2025-01-01", periods=288, freq="h", tz="UTC")
+    observations = pd.DataFrame(
+        {"storage": np.linspace(100.0, 200.0, len(index)), "outflow": 4.0},
+        index=index,
+    )
+    monkeypatch.setattr(
+        run_noise_tuner, "sources_for_reservoir", lambda root, reservoir: None
+    )
+    monkeypatch.setattr(
+        run_noise_tuner,
+        "prepare_reservoir_data",
+        lambda *args, **kwargs: SimpleNamespace(observations=observations),
+    )
+    closed: list[bool] = []
+    monkeypatch.setattr(
+        run_noise_tuner._ProgressPrinter,
+        "close",
+        lambda self, *, completed=True: closed.append(completed),
+    )
+
+    def failing_tune(**kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(run_noise_tuner, "tune_inflow_noise", failing_tune)
+    with pytest.raises(KeyboardInterrupt):
+        run_noise_tuner.run_noise_tuner(
+            project_root=tmp_path,
+            reservoir="Lexington",
+            data_start="2025-01-01T00:00:00-08:00",
+            data_end="2025-01-13T00:00:00-08:00",
+            output_path=tmp_path / "config.json",
+        )
+    assert closed == [False]
+
+
 def test_progress_bars_write_periodic_lines_to_a_log() -> None:
     stream = _FakeStream(interactive=False)
     printer = run_noise_tuner._ProgressPrinter(stream)

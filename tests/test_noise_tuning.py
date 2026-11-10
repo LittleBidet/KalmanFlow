@@ -399,6 +399,39 @@ def test_maximum_likelihood_recovers_identifiable_synthetic_noise_terms() -> Non
     assert any("poorly identified" in warning for warning in result.warnings)
 
 
+def test_identifiability_does_not_depend_on_window_weights() -> None:
+    from kalmanflow.noise_tuning import _parameters, _preparation, _workflows
+
+    storage, discharge, _ = _inputs(40)
+    index = storage.index
+    settings, tuning = _settings()
+    config = _config()
+    prepared = _prepare(storage, discharge, config)
+    space = _parameters._ParameterSpace.from_settings(config, tuning)
+    errors = []
+    # Two short windows and one long one, weighted equally and then not.
+    for weights in ((1.0, 1.0, 1.0), (1.0, 1.0, 4.0)):
+        windows = _validate_windows(
+            tuple(
+                ValidationWindow(f"w{i}", index[a], index[b], weight=weight)
+                for i, ((a, b), weight) in enumerate(
+                    zip(((2, 8), (8, 14), (14, 38)), weights, strict=True)
+                )
+            )
+        )
+        plan = _preparation._diagnostic_plan(prepared, windows, settings)
+        objective = _workflows._Objective(
+            prepared, windows, settings, plan, _workflows._ProgressReporter(None, 1)
+        )
+        selected = _workflows._Candidate(
+            "search-1", dict(space.base), objective.evaluate(space.base)
+        )
+        frame, _ = _workflows._check_identifiability(objective, space, selected)
+        errors.append(frame["log_standard_error"].to_numpy())
+    assert len(errors[0]) == 3
+    np.testing.assert_allclose(errors[0], errors[1], rtol=1e-9)
+
+
 def test_inflow_seeds_must_lie_inside_q_inflow_bounds() -> None:
     storage, discharge, windows = _inputs()
     with pytest.raises(ValueError, match="inside q_inflow_multiplier_bounds"):
@@ -495,8 +528,47 @@ def test_all_failed_evaluations_raise_noise_tuning_error(
         raise np.linalg.LinAlgError("injected numerical failure")
 
     monkeypatch.setattr(_candidate, "kalman_filter", fail_all)
-    with pytest.raises(NoiseTuningError, match="no local search reached"):
+    with pytest.raises(NoiseTuningError, match="nor any local search reached"):
         _tune(storage, discharge, windows)
+
+
+def test_base_is_kept_when_every_search_stops_at_worse_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kalmanflow.noise_tuning import _optimization
+
+    storage, discharge, windows = _inputs()
+
+    def stop_at_upper_corner(objective, start, max_evaluations):
+        # Every term on its upper bound scores far worse than the base here.
+        return _optimization._SearchOutcome(
+            point=np.ones(len(start)),
+            evaluations=1,
+            converged=False,
+            message="evaluation budget reached",
+        )
+
+    monkeypatch.setattr(_optimization, "_local_search", stop_at_upper_corner)
+    result = _tune(storage, discharge, windows)
+    summary = result.candidate_summary.set_index("candidate")
+    searched = summary.loc[["search-1", "search-2"], "objective"]
+    assert (searched > summary.loc["base", "objective"]).all()
+    assert summary.loc["base", "selected"]
+    assert result.selected_objective == result.base_objective
+    assert result.selected_parameters == {
+        "q_storage": 0.002,
+        "q_inflow": 1.0,
+        "q_outflow": 0.02,
+        "r_storage": 0.25,
+        "r_outflow": 4.0,
+    }
+    assert result.selected_config.metadata["selection"]["selected_candidate"] == (
+        "base"
+    )
+    assert any("keeps the base noise terms" in w for w in result.warnings)
+    assert result.window_diagnostics["candidate"].tolist() == ["base"] * len(windows)
+    assert not any("did not converge" in w for w in result.warnings)
+    assert not any("not clearly better" in w for w in result.warnings)
 
 
 def test_search_is_reproducible() -> None:
@@ -562,6 +634,60 @@ def test_tuner_rejects_zero_base_term_for_multiplier_bounds() -> None:
     zero_q = replace(_config(), q=np.diag([0.0, 1.0, 0.02]))
     with pytest.raises(ValueError, match="positive and finite"):
         _tune(storage, discharge, windows, config=zero_q)
+
+
+def test_vectorized_row_scores_match_the_scalar_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, storage, discharge, windows = _synthetic_config_and_observations()
+    # Cover every observation pattern: both, storage only, outflow only, none.
+    storage = storage.copy()
+    discharge = discharge.copy()
+    storage.iloc[[30, 31, 95, 150]] = np.nan
+    discharge.iloc[[40, 41, 95, 160, 161]] = np.nan
+    prepared = _prepare(storage, discharge, config)
+    settings = NoiseEvaluationSettings(warmup=timedelta(0))
+    validated = _validate_windows(windows)
+
+    def evaluate():
+        return _candidate._evaluate_candidate(
+            prepared, q_inflow=0.04, windows=validated, settings=settings
+        )
+
+    vectorized = evaluate()
+    monkeypatch.setattr(
+        _candidate, "_clean_rows", lambda finite, *arrays: np.zeros(len(finite), bool)
+    )
+    scalar = evaluate()
+
+    for key, values in scalar.diagnostics.items():
+        np.testing.assert_allclose(
+            vectorized.diagnostics[key], values, rtol=1e-12, atol=1e-12, err_msg=key
+        )
+    assert vectorized.reasons == scalar.reasons
+    for name, row in scalar.window_rows.items():
+        for column, value in row.items():
+            if isinstance(value, float):
+                assert vectorized.window_rows[name][column] == pytest.approx(
+                    value, rel=1e-12, abs=1e-12, nan_ok=True
+                ), column
+            else:
+                assert vectorized.window_rows[name][column] == value, column
+
+
+def test_near_singular_rows_take_the_scalar_path() -> None:
+    finite = np.ones((3, 2), dtype=bool)
+    innovations = np.zeros((3, 2))
+    covariances = np.array(
+        [
+            [[1.0, 0.0], [0.0, 1.0]],
+            # Positive definite, but too close to singular for closed forms.
+            [[1.0, 1.0 - 1e-12], [1.0 - 1e-12, 1.0]],
+            [[0.0, 0.0], [0.0, 1.0]],
+        ]
+    )
+    clean = _candidate._clean_rows(finite, innovations, covariances)
+    assert clean.tolist() == [True, False, False]
 
 
 def test_joint_nlpd_is_aggregated_per_observed_component() -> None:
@@ -700,6 +826,32 @@ def test_failed_proxy_check_warns_but_never_changes_selection(
     assert result.selected_parameters == baseline.selected_parameters
     warned = any("upstream-proxy" in warning for warning in result.warnings)
     assert warned is not passes
+
+
+@pytest.mark.parametrize(
+    ("proxy_index", "error", "message"),
+    [
+        (lambda index: index.tz_localize(None), ValueError, "timezone-aware"),
+        (lambda index: range(len(index)), TypeError, "DatetimeIndex"),
+    ],
+)
+def test_bad_proxy_index_is_rejected_before_any_filtering_pass(
+    monkeypatch: pytest.MonkeyPatch, proxy_index, error, message
+) -> None:
+    storage, discharge, windows = _inputs()
+    proxy = pd.Series(1.0, index=proxy_index(storage.index))
+    calls = 0
+    real_filter = _candidate.kalman_filter
+
+    def counting_filter(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_filter(*args, **kwargs)
+
+    monkeypatch.setattr(_candidate, "kalman_filter", counting_filter)
+    with pytest.raises(error, match=message):
+        _tune(storage, discharge, windows, upstream_proxy=proxy)
+    assert calls == 0
 
 
 def test_proxy_correlations_ignore_amplitude() -> None:
@@ -1001,6 +1153,16 @@ def test_progress_reports_each_filter_pass_by_phase(
     assert best == sorted(best, reverse=True)
     elapsed = [u.elapsed_seconds for u in updates]
     assert elapsed == sorted(elapsed)
+
+
+def test_final_best_objective_is_the_selected_objective() -> None:
+    # With 30 evaluations per search, a perturbation in the identifiability
+    # phase scores below the selected optimum on this data.
+    storage, discharge, windows = _inputs()
+    updates: list[NoiseTuningProgress] = []
+    result = _tune(storage, discharge, windows, progress=updates.append)
+    assert updates[-1].phase == "identifiability"
+    assert updates[-1].best_objective == result.selected_objective
 
 
 def test_progress_has_no_identifiability_phase_when_the_check_is_off() -> None:

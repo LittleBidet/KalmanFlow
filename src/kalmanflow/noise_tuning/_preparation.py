@@ -19,7 +19,7 @@ from ._types import (
 Array = np.ndarray
 
 
-def _validate_index(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+def _validate_index(index: pd.Index) -> pd.DatetimeIndex:
     if not isinstance(index, pd.DatetimeIndex):
         raise ValueError("storage and discharge indexes must be DatetimeIndex")
     if index.tz is None:

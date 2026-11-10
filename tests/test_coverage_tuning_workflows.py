@@ -20,7 +20,7 @@ from kalmanflow import (
     evaluate_configuration,
     tune_inflow_noise,
 )
-from kalmanflow.noise_tuning import _optimization, _workflows
+from kalmanflow.noise_tuning import _candidate, _optimization, _workflows
 
 
 def _config() -> ReservoirConfig:
@@ -159,12 +159,59 @@ def test_identifiability_is_skipped_when_every_term_is_at_a_bound(
     def search_to_corner(
         objective: object, start: np.ndarray, max_evaluations: int
     ) -> _optimization._SearchOutcome:
-        return _optimization._SearchOutcome(np.ones(5), 1, True, "corner")
+        # The lower corner beats the base here, so it is selected.
+        return _optimization._SearchOutcome(np.zeros(5), 1, True, "corner")
 
     monkeypatch.setattr(_optimization, "_local_search", search_to_corner)
     result = tune_inflow_noise(**_tune_kwargs())  # type: ignore[arg-type]
+    assert result.candidate_summary.query("selected")["candidate"].item() == (
+        "search-1"
+    )
     assert result.identifiability.empty
     assert not any("identified" in warning for warning in result.warnings)
+
+
+def test_improvement_is_unknown_when_the_base_fails_validity() -> None:
+    # Finite per-window losses, but the base fails a hard validity check
+    # (for example too much covariance regularization), so it scores inf.
+    objective = SimpleNamespace(
+        window_losses=lambda result: result,
+        score=lambda result: np.inf if result[0] == 9.0 else 1.0,
+        weights=np.array([0.5, 0.5]),
+    )
+    base = SimpleNamespace(result=np.array([9.0, 9.0]))
+    selected = SimpleNamespace(result=np.array([1.0, 1.0]))
+    improvement, error = _workflows._improvement_over_base(
+        objective,  # type: ignore[arg-type]
+        base,  # type: ignore[arg-type]
+        selected,  # type: ignore[arg-type]
+    )
+    assert np.isnan(improvement)
+    assert np.isnan(error)
+
+
+def test_tuning_reports_unknown_improvement_for_an_invalid_base() -> None:
+    from kalmanflow.noise_tuning import _parameters
+
+    kwargs = _tune_kwargs()
+    base_terms = _parameters._base_parameters(kwargs["base_config"])
+    real_evaluate = _candidate._evaluate_candidate
+
+    def regularize_base(prepared, **options):
+        result = real_evaluate(prepared, **options)
+        if options.get("q_storage_override") == base_terms["q_storage"] and (
+            options["q_inflow"] == base_terms["q_inflow"]
+        ):
+            result.reasons.append("excessive covariance regularization")
+        return result
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(_candidate, "_evaluate_candidate", regularize_base)
+        result = tune_inflow_noise(**kwargs)  # type: ignore[arg-type]
+    assert result.base_objective == np.inf
+    assert np.isnan(result.improvement_standard_error)
+    assert result.selected_config.metadata["selection"]["base_objective"] == np.inf
+    assert any("base configuration could not be scored" in w for w in result.warnings)
 
 
 def test_five_windows_drop_the_weak_uncertainty_warning() -> None:
@@ -183,7 +230,9 @@ def test_improvement_warnings_cover_unknown_unclear_and_clear_gains() -> None:
 
 def test_improvement_is_unknown_when_base_cannot_be_scored() -> None:
     objective = SimpleNamespace(
-        window_losses=lambda result: result, weights=np.array([0.5, 0.5])
+        window_losses=lambda result: result,
+        score=lambda result: 1.0,
+        weights=np.array([0.5, 0.5]),
     )
     base = SimpleNamespace(result=np.array([np.nan, 1.0]))
     selected = SimpleNamespace(result=np.array([1.0, 1.0]))

@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 import math
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum, auto
 from statistics import NormalDist
-from typing import Final
+from typing import Final, SupportsFloat, cast
 
 import numpy as np
 import pandas
@@ -19,7 +19,7 @@ from ._reservoir_checkpoint import (
     decode_reservoir_checkpoint,
     encode_reservoir_checkpoint,
 )
-from ._validation import bounded_integer, measurement_value
+from ._validation import COVARIANCE_PSD_RTOL, bounded_integer, measurement_value
 from .flags import OutputFlag
 from .kalman import kalman_filter
 from .models import ReservoirStateSpaceModel
@@ -28,6 +28,8 @@ from .reservoir_backend import ReservoirBackend
 from .reservoir_config import ReservoirConfig
 from .rts import (
     OnlineFixedLagRTS,
+    _release_count,
+    _require_release_or_room,
     _rts_gains,
     _rts_smooth_arrays,
     _rts_smooth_means,
@@ -67,7 +69,7 @@ def _validated_interval_level(level: object) -> float:
     """Return a finite central interval level strictly inside (0, 1)."""
 
     try:
-        value = float(level)
+        value = float(cast(SupportsFloat, level))
     except (TypeError, ValueError) as error:
         raise ValueError(
             "level must be finite and strictly between 0 and 1"
@@ -99,13 +101,7 @@ def _inflow_standard_deviation(
     array = np.asarray(covariance, dtype=float)
     if array.ndim != 2 or array.shape[0] <= 1 or array.shape[1] <= 1:
         raise ValueError(f"{name} must contain an inflow covariance entry")
-    if not np.isfinite(array).all():
-        raise ValueError(f"{name} must contain only finite values")
-    variance = float(array[1, 1])
-    tolerance = 1e-12 * max(1.0, abs(variance))
-    if variance < -tolerance:
-        raise ValueError(f"{name} has a materially negative inflow variance")
-    return math.sqrt(max(variance, 0.0))
+    return float(_inflow_standard_deviations(array[None], name=name)[0])
 
 
 def _inflow_standard_deviations(
@@ -121,7 +117,7 @@ def _inflow_standard_deviations(
     if not np.isfinite(array).all():
         raise ValueError(f"{name} must contain only finite values")
     variances = np.asarray(array[:, 1, 1], dtype=float)
-    tolerance = 1e-12 * np.maximum(1.0, np.abs(variances))
+    tolerance = COVARIANCE_PSD_RTOL * np.maximum(1.0, np.abs(variances))
     if np.any(variances < -tolerance):
         raise ValueError(f"{name} has a materially negative inflow variance")
     return np.sqrt(np.maximum(variances, 0.0))
@@ -237,6 +233,45 @@ class OnlineReservoirInflow:
             r_outflow=r_outflow,
             unit_system=unit_system,
         )
+        self._initialize(
+            backend,
+            smoothing_lag=smoothing_lag,
+            max_window_steps=max_window_steps,
+            reservoir_id=reservoir_id,
+            include_uncertainty=include_uncertainty,
+        )
+
+    @classmethod
+    def from_config(
+        cls,
+        config: ReservoirConfig,
+        *,
+        max_window_steps: int = 100_000,
+        include_uncertainty: bool = False,
+    ) -> OnlineReservoirInflow:
+        """Create an estimator from a validated reservoir configuration."""
+
+        instance = cls.__new__(cls)
+        instance._initialize(
+            _build_configured_backend(config),
+            smoothing_lag=config.smoothing_lag,
+            max_window_steps=max_window_steps,
+            reservoir_id=config.reservoir_id,
+            include_uncertainty=include_uncertainty,
+        )
+        return instance
+
+    def _initialize(
+        self,
+        backend: ReservoirBackend,
+        *,
+        smoothing_lag: timedelta,
+        max_window_steps: int,
+        reservoir_id: str | None,
+        include_uncertainty: bool,
+    ) -> None:
+        """Set every instance field; shared by ``__init__`` and ``from_config``."""
+
         self._pipeline = _build_pipeline(
             backend,
             smoothing_lag=smoothing_lag,
@@ -251,34 +286,6 @@ class OnlineReservoirInflow:
             include_uncertainty
         )
         self._status = _StreamStatus.AWAITING_SUCCESS
-
-    @classmethod
-    def from_config(
-        cls,
-        config: ReservoirConfig,
-        *,
-        max_window_steps: int = 100_000,
-        include_uncertainty: bool = False,
-    ) -> OnlineReservoirInflow:
-        """Create an estimator from a validated reservoir configuration."""
-
-        instance = cls.__new__(cls)
-        backend = _build_configured_backend(config)
-        instance._pipeline = _build_pipeline(
-            backend,
-            smoothing_lag=config.smoothing_lag,
-            max_window_steps=max_window_steps,
-        )
-        instance._configuration_fingerprint = _configuration_fingerprint(
-            backend,
-            config.smoothing_lag,
-        )
-        instance._reservoir_id = config.reservoir_id
-        instance._include_uncertainty = _validate_include_uncertainty(
-            include_uncertainty
-        )
-        instance._status = _StreamStatus.AWAITING_SUCCESS
-        return instance
 
     @classmethod
     def from_checkpoint(
@@ -414,9 +421,11 @@ class OnlineReservoirInflow:
         # Nothing has changed until the entry snapshot exists.
         outcome = _StreamStatus.AWAITING_SUCCESS
         try:
+            # An out-of-order group is rejected before the snapshot, so it
+            # never pays for a rollback replay of the active window.
+            self._validate_complete_order(values)
             entry_state = self._pipeline.export_state()
             try:
-                self._validate_complete_order(values)
                 updates = tuple(
                     self._to_public_update(
                         self._pipeline.process(
@@ -893,7 +902,7 @@ def _run_batch(
 
 
 def _process_reservoir_batch_raw(
-    index: pandas.DatetimeIndex,
+    index: pandas.Index,
     storage: np.ndarray,
     discharge: np.ndarray,
     *,
@@ -929,7 +938,7 @@ def _process_reservoir_batch_raw(
         len(index), include_uncertainty=include_uncertainty
     )
     first, second = _initialization_positions(storage, discharge)
-    if second is None:
+    if first is None or second is None:
         return pandas.DataFrame(result, index=index)
 
     positions = np.concatenate(
@@ -937,7 +946,8 @@ def _process_reservoir_batch_raw(
     )
     timestamps = index[positions]
     observations = np.column_stack((storage[positions], discharge[positions]))
-    elapsed = _batch_elapsed_seconds(timestamps)
+    timestamp_us = _batch_timestamp_microseconds(timestamps)
+    elapsed = _batch_elapsed_seconds(timestamps, timestamp_us)
     distinct_elapsed, inverse = np.unique(elapsed, return_inverse=True)
     transitions = np.asarray(
         [backend.model.transition_matrix(seconds) for seconds in distinct_elapsed],
@@ -979,6 +989,7 @@ def _process_reservoir_batch_raw(
         result,
         positions=positions,
         timestamps=timestamps,
+        timestamp_us=timestamp_us,
         filtered=filtered,
         prediction_flags=prediction_flags,
         smoothing_lag=smoothing_lag,
@@ -1037,7 +1048,7 @@ def _initialization_positions(
 
 
 def _batch_timestamp_microseconds(
-    timestamps: pandas.DatetimeIndex,
+    timestamps: pandas.Index,
 ) -> np.ndarray | None:
     """Use exact microseconds where the original timestamp range permits it."""
 
@@ -1053,10 +1064,15 @@ def _batch_timestamp_microseconds(
     return values
 
 
-def _batch_elapsed_seconds(timestamps: pandas.DatetimeIndex) -> np.ndarray:
-    """Vectorize pandas' whole-seconds-plus-microseconds conversion order."""
+def _batch_elapsed_seconds(
+    timestamps: pandas.Index, timestamp_us: np.ndarray | None
+) -> np.ndarray:
+    """Vectorize pandas' whole-seconds-plus-microseconds conversion order.
 
-    timestamp_us = _batch_timestamp_microseconds(timestamps)
+    ``timestamp_us`` is :func:`_batch_timestamp_microseconds` of
+    ``timestamps``, computed once per batch call by the caller.
+    """
+
     if timestamp_us is None:
         return np.asarray(
             [
@@ -1070,7 +1086,7 @@ def _batch_elapsed_seconds(timestamps: pandas.DatetimeIndex) -> np.ndarray:
     return seconds + microseconds / 1_000_000
 
 
-def _validate_batch_timestamps(index: pandas.DatetimeIndex) -> None:
+def _validate_batch_timestamps(index: pandas.Index) -> None:
     """Apply the streaming timestamp contract before batch computation."""
 
     if (
@@ -1097,7 +1113,8 @@ def _write_fixed_lag_inflow_revisions(
     result: dict[str, np.ndarray],
     *,
     positions: np.ndarray,
-    timestamps: pandas.DatetimeIndex,
+    timestamps: pandas.Index,
+    timestamp_us: np.ndarray | None,
     filtered,
     prediction_flags: np.ndarray,
     smoothing_lag: timedelta,
@@ -1112,36 +1129,31 @@ def _write_fixed_lag_inflow_revisions(
         filtered.transition_matrices,
     )
     # Pandas lags may carry sub-microsecond remainders or wider resolutions.
-    timestamp_us = (
-        None
-        if getattr(smoothing_lag, "nanoseconds", 0)
-        else _batch_timestamp_microseconds(timestamps)
-    )
+    if getattr(smoothing_lag, "nanoseconds", 0):
+        timestamp_us = None
     lag_us = 0
     if timestamp_us is not None:
         try:
             lag_us = smoothing_lag // timedelta(microseconds=1)
         except pandas.errors.OutOfBoundsTimedelta:
             timestamp_us = None
+    microseconds = timestamp_us
+
+    def lag_passed_at(current: int) -> Callable[[int], bool]:
+        # Same release rule as OnlineFixedLagRTS.add_step, with exact
+        # microsecond arithmetic where the index range allows it.
+        if microseconds is None:
+            return lambda candidate: (
+                timestamps[current] - timestamps[candidate] >= smoothing_lag
+            )
+        now_us = int(microseconds[current])
+        return lambda candidate: now_us - int(microseconds[candidate]) >= lag_us
+
     active: deque[int] = deque()
     for current in range(len(timestamps)):
-        eligible = 0
-        for candidate in active:
-            ready = (
-                timestamps[current] - timestamps[candidate] >= smoothing_lag
-                if timestamp_us is None
-                else int(timestamp_us[current]) - int(timestamp_us[candidate]) >= lag_us
-            )
-            if ready:
-                eligible += 1
-            else:
-                break
+        eligible = _release_count(active, lag_passed_at(current))
+        _require_release_or_room(eligible, len(active), max_window_steps)
         if not eligible:
-            if len(active) == max_window_steps:
-                raise OverflowError(
-                    "active RTS window reached max_window_steps before "
-                    "a state finalized"
-                )
             active.append(current)
             continue
 

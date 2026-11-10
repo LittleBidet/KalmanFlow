@@ -46,6 +46,11 @@ jobs:
       - name: Check lint
         run: uv run --no-sync ruff check .
 
+      # Configured for Python 3.12 in pyproject.toml, so one run is enough.
+      - name: Check types
+        if: matrix.python-version == '3.12'
+        run: uv run --no-sync mypy
+
       - name: Run tests
         run: uv run --no-sync python -m pytest --cov --cov-report=term-missing
 

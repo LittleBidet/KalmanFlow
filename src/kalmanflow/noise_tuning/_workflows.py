@@ -18,7 +18,7 @@ from . import (
     _proxy,
     _storage_noise,
 )
-from ._parameters import _ParameterSpace
+from ._parameters import _base_parameters, _ParameterSpace
 from ._types import (
     _PARAMETER_NAMES,
     ConfigEvaluationResult,
@@ -120,15 +120,20 @@ class _ProgressReporter:
         self._limit = 0
         self._evaluations = 0
         self._best = np.inf
+        self._proposable = True
 
-    def start_phase(self, phase: str, limit: int) -> None:
+    def start_phase(self, phase: str, limit: int, *, proposable: bool = True) -> None:
+        """Begin a phase; passes in a non-proposable one leave the best alone."""
+
         self._phase, self._limit, self._evaluations = phase, limit, 0
+        self._proposable = proposable
         self._phase_number += 1
         self._emit()
 
     def evaluated(self, score: float) -> None:
         self._evaluations += 1
-        self._best = min(self._best, score)
+        if self._proposable:
+            self._best = min(self._best, score)
         self._emit()
 
     def _emit(self) -> None:
@@ -152,9 +157,10 @@ class _Objective:
 
     This is the negative log-likelihood of the validation-window innovations
     per observed component, so minimizing it is maximum-likelihood
-    estimation. Scores are cached, so finite-difference steps and the
-    identifiability check never refilter the same parameters. A parameter set
-    that fails the hard validity checks scores ``inf``.
+    estimation. Scores and total negative log-likelihoods are cached, so
+    finite-difference steps and the identifiability check never refilter the
+    same parameters. A parameter set that fails the hard validity checks
+    scores ``inf``.
     """
 
     def __init__(
@@ -172,6 +178,7 @@ class _Objective:
         self.weights = _preparation._window_weights(windows)
         self.progress = progress
         self._scores: dict[tuple[float, ...], float] = {}
+        self._totals: dict[tuple[float, ...], float] = {}
 
     def evaluate(self, parameters: Mapping[str, float]) -> _Pass:
         """Run one causal filtering pass and keep its full diagnostics."""
@@ -198,23 +205,39 @@ class _Objective:
             dtype=float,
         )
 
-    def scored_components(self, candidate: _Pass) -> int:
-        return sum(
-            int(candidate.window_rows[window.name]["joint_count"])
-            for window in self.windows
-        )
-
     def score(self, candidate: _Pass) -> float:
         valid, _ = _hard_validity(candidate, self.windows, self.settings)
         if not valid:
             return np.inf
         return float(np.dot(self.weights, self.window_losses(candidate)))
 
+    def total_negative_log_likelihood(self, candidate: _Pass) -> float:
+        """Sum the joint NLPD over every scored component, ignoring weights."""
+
+        if not np.isfinite(self.score(candidate)):
+            return np.inf
+        return float(
+            sum(
+                float(row["joint_nlpd"]) * int(row["joint_count"])
+                for row in (candidate.window_rows[w.name] for w in self.windows)
+            )
+        )
+
     def __call__(self, parameters: Mapping[str, float]) -> float:
+        return self._scores[self._cached(parameters)]
+
+    def total(self, parameters: Mapping[str, float]) -> float:
+        """Return the cached total negative log-likelihood of ``parameters``."""
+
+        return self._totals[self._cached(parameters)]
+
+    def _cached(self, parameters: Mapping[str, float]) -> tuple[float, ...]:
         key = tuple(float(parameters[name]) for name in _PARAMETER_NAMES)
         if key not in self._scores:
-            self._scores[key] = self.score(self.evaluate(parameters))
-        return self._scores[key]
+            result = self.evaluate(parameters)
+            self._scores[key] = self.score(result)
+            self._totals[key] = self.total_negative_log_likelihood(result)
+        return key
 
 
 @dataclass(frozen=True)
@@ -258,8 +281,10 @@ def tune_inflow_noise(
 
     Each inflow increment seed (an hourly standard deviation) gives one
     starting point. The best ``local_searches`` starts are refined with
-    bounded L-BFGS-B in log-parameter space, and the best valid optimum is
-    proposed. Requires the optional ``kalmanflow[tuning]`` dependencies.
+    bounded L-BFGS-B in log-parameter space. The valid optimum with the lowest
+    objective is proposed, unless the base configuration scores lower, in
+    which case the base terms are kept and a warning says so. Requires the
+    optional ``kalmanflow[tuning]`` dependencies.
     Calibration, identifiability, and upstream-proxy checks are reported as
     warnings and never change the selection. Proposals require independent
     validation before operational use.
@@ -328,7 +353,11 @@ def tune_inflow_noise(
     )
     improvement, improvement_error = _improvement_over_base(objective, base, selected)
     warnings = [
-        *_improvement_warnings(improvement, improvement_error, options),
+        *(
+            _improvement_warnings(improvement, improvement_error, options)
+            if selected is not base
+            else []
+        ),
         *_selection_warnings(selected, space, len(windows)),
         *(
             f"calibration: {warning}"
@@ -360,7 +389,9 @@ def tune_inflow_noise(
         base_objective=base_objective,
         improvement_standard_error=improvement_error,
         candidate_summary=summary,
-        window_diagnostics=_window_frame((base, selected), windows),
+        window_diagnostics=_window_frame(
+            (base,) if selected is base else (base, selected), windows
+        ),
         identifiability=identifiability,
         storage_noise=storage_noise,
         proxy_diagnostics=proxy_frame,
@@ -389,8 +420,8 @@ def _validate_tuning_arguments(
         raise ValueError("proposed_configuration_version is required")
     if version == base_config.configuration_version:
         raise ValueError("proposed_configuration_version must be new")
-    if upstream_proxy is not None and not isinstance(upstream_proxy, pd.Series):
-        raise TypeError("upstream_proxy must be a pandas Series or None")
+    if upstream_proxy is not None:
+        _proxy._validate_proxy(upstream_proxy)
     if progress is not None and not callable(progress):
         raise TypeError("progress must be callable or None")
 
@@ -432,20 +463,29 @@ def _search(
 
 
 def _select(candidates: Sequence[_Candidate], objective: _Objective) -> _Candidate:
-    """Return the valid local optimum with the lowest objective."""
+    """Return the valid candidate with the lowest objective.
 
-    optima = [
+    The base configuration competes with the local optima, so a search that
+    stops early at worse settings never replaces it. A tie keeps the optimum.
+    """
+
+    valid = [
         candidate
         for candidate in candidates
-        if candidate.search is not None
-        and np.isfinite(objective.score(candidate.result))
+        if np.isfinite(objective.score(candidate.result))
     ]
-    if not optima:
+    if not valid:
         raise NoiseTuningError(
-            "no local search reached noise settings that pass the hard "
-            "validity checks"
+            "neither the base configuration nor any local search reached noise "
+            "settings that pass the hard validity checks"
         )
-    return min(optima, key=lambda candidate: objective.score(candidate.result))
+    return min(
+        valid,
+        key=lambda candidate: (
+            objective.score(candidate.result),
+            candidate.search is None,
+        ),
+    )
 
 
 def _check_identifiability(
@@ -456,11 +496,13 @@ def _check_identifiability(
     if not free:
         return pd.DataFrame(), []
     # A central-difference Hessian over n terms needs 2n² points plus the center.
-    objective.progress.start_phase("identifiability", 2 * len(free) ** 2 + 1)
-    hessian = _identifiability._log_space_hessian(objective, selected.parameters, free)
-    return _identifiability._identifiability_report(
-        hessian, free, objective.scored_components(selected.result)
+    objective.progress.start_phase(
+        "identifiability", 2 * len(free) ** 2 + 1, proposable=False
     )
+    hessian = _identifiability._log_space_hessian(
+        objective.total, selected.parameters, free
+    )
+    return _identifiability._identifiability_report(hessian, free)
 
 
 def _candidate_row(
@@ -503,8 +545,14 @@ def _candidate_row(
 def _improvement_over_base(
     objective: _Objective, base: _Candidate, selected: _Candidate
 ) -> tuple[float, float]:
-    """Return the weighted per-window NLPD gain over base and its paired SE."""
+    """Return the weighted per-window NLPD gain over base and its paired SE.
 
+    A base that fails the hard validity checks has no comparable score, even
+    when its per-window losses are finite, so the gain is unknown.
+    """
+
+    if not np.isfinite(objective.score(base.result)):
+        return np.nan, np.nan
     differences = objective.window_losses(base.result) - objective.window_losses(
         selected.result
     )
@@ -535,16 +583,23 @@ def _selection_warnings(
     selected: _Candidate, space: _ParameterSpace, window_count: int
 ) -> list[str]:
     warnings = []
-    if not selected.search.converged:
+    if selected.search is None:
         warnings.append(
-            f"the selected local search did not converge: {selected.search.message}"
+            "no local search scored better than the base configuration, so the "
+            "proposal keeps the base noise terms"
         )
-    at_bounds = space.names_at_bounds(selected.parameters)
-    if at_bounds:
-        warnings.append(
-            f"selected {', '.join(at_bounds)} at the edge of the search bounds; "
-            "the likelihood optimum may lie outside them"
-        )
+    else:
+        if not selected.search.converged:
+            warnings.append(
+                "the selected local search did not converge: "
+                f"{selected.search.message}"
+            )
+        at_bounds = space.names_at_bounds(selected.parameters)
+        if at_bounds:
+            warnings.append(
+                f"selected {', '.join(at_bounds)} at the edge of the search "
+                "bounds; the likelihood optimum may lie outside them"
+            )
     if window_count < 5:
         warnings.append(
             "fewer than five validation windows are available; uncertainty is weak"
@@ -666,10 +721,10 @@ def evaluate_configuration(
             prepared.index[-1] + pd.Timedelta(nanoseconds=1),
         )
     windows = _preparation._validate_windows((evaluation_window,))
-    q_inflow = float(config.q[1, 1])
+    terms = _base_parameters(config)
     candidate = _candidate._evaluate_candidate(
         prepared,
-        q_inflow=q_inflow,
+        q_inflow=terms["q_inflow"],
         windows=windows,
         settings=options,
         plan=_preparation._diagnostic_plan(prepared, windows, options),
@@ -692,11 +747,7 @@ def evaluate_configuration(
     summary = pd.DataFrame(
         [
             {
-                "q_storage": float(config.q[0, 0]),
-                "q_inflow": q_inflow,
-                "q_outflow": float(config.q[2, 2]),
-                "r_storage": float(config.r[0, 0]),
-                "r_outflow": float(config.r[1, 1]),
+                **terms,
                 "eligible": eligible,
                 "calibrated": eligible and not calibration_warnings,
                 "rejection_reasons": "; ".join(validity_reasons),

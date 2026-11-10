@@ -5,6 +5,7 @@ from __future__ import annotations
 from math import isinf
 from numbers import Real
 from operator import index
+from typing import SupportsIndex, cast
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -65,7 +66,7 @@ def bounded_integer(value: object, *, name: str, minimum: int) -> int:
     if isinstance(value, bool | np.bool_):
         raise TypeError(f"{name} must be an integer")
     try:
-        integer = index(value)
+        integer = index(cast(SupportsIndex, value))
     except TypeError as error:
         raise TypeError(f"{name} must be an integer") from error
     if integer < minimum:

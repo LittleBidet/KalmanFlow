@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, SupportsFloat, cast
 
 import numpy as np
 import pandas as pd
@@ -47,7 +47,7 @@ def _optional_nonnegative(value: object | None, name: str) -> float | None:
 
 
 def _positive_increasing_pair(value: object, name: str) -> tuple[float, float]:
-    pair = tuple(float(item) for item in value)  # type: ignore[union-attr]
+    pair = tuple(float(item) for item in cast(Iterable[SupportsFloat], value))
     if (
         len(pair) != 2
         or not np.isfinite(pair).all()
@@ -83,7 +83,9 @@ class ValidationWindow:
         object.__setattr__(self, "end", end)
 
     def mask(self, index: pd.DatetimeIndex) -> np.ndarray:
-        return (index >= self.start) & (index < self.end)
+        # __post_init__ stores both bounds as UTC pandas Timestamps.
+        start, end = cast(pd.Timestamp, self.start), cast(pd.Timestamp, self.end)
+        return (index >= start) & (index < end)
 
 
 @dataclass(frozen=True)
@@ -131,8 +133,8 @@ class NoiseEvaluationSettings:
             "autocorrelation_warning",
             "coverage_warning",
         ):
-            value = _optional_nonnegative(getattr(self, name), name)
-            object.__setattr__(self, name, value)
+            threshold = _optional_nonnegative(getattr(self, name), name)
+            object.__setattr__(self, name, threshold)
         if self.nis_warning_range is not None:
             low, high = (float(value) for value in self.nis_warning_range)
             if not (np.isfinite(low) and np.isfinite(high) and 0.0 <= low < high):
@@ -145,10 +147,11 @@ class NoiseTuningSettings:
     """Search bounds, search budget, and optional proxy-check thresholds.
 
     Each ``*_multiplier_bounds`` pair is applied to the matching diagonal
-    term of the base configuration. Storage noise is capped at its reviewed
-    base value by default: the innovation likelihood alone cannot tell a rapid
-    inflow event from an over-dispersed storage channel. Callers with
-    independent evidence may widen those bounds explicitly.
+    term of the base configuration. Storage process noise (``q_storage``) is
+    capped at its reviewed base value by default: the innovation likelihood
+    alone cannot tell a rapid inflow event from an over-dispersed storage
+    channel. Callers with independent evidence may widen those bounds
+    explicitly.
 
     With ``estimate_r_storage`` (the default), ``r_storage`` is instead
     searched between ``estimate / r_storage_estimate_factor`` and
@@ -205,10 +208,10 @@ class NoiseTuningSettings:
             raise ValueError("proxy_diagnostic_frequency must be positive")
         object.__setattr__(self, "proxy_diagnostic_frequency", frequency)
         for name in ("proxy_min_shape_correlation", "proxy_min_change_correlation"):
-            value = float(getattr(self, name))
-            if not np.isfinite(value) or not -1.0 <= value <= 1.0:
+            correlation = float(getattr(self, name))
+            if not np.isfinite(correlation) or not -1.0 <= correlation <= 1.0:
                 raise ValueError(f"{name} must be between -1 and 1")
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, correlation)
 
     @staticmethod
     def multiplier_bounds_names() -> tuple[str, ...]:
@@ -299,6 +302,9 @@ class NoiseTuningProgress:
     ``phase_number`` counts from 1 to ``phase_count``. The identifiability
     phase is counted when the check is enabled but skipped when every term
     ends on a search bound, so the run can finish one phase early.
+    ``best_objective`` is the lowest objective of any screening or search
+    pass so far, the base configuration included. Identifiability passes are
+    not counted, because their perturbed settings are never proposed.
     """
 
     phase: str

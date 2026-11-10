@@ -2,10 +2,10 @@
 
 A flat or ridge-shaped objective means the data cannot separate some noise
 terms, for example storage process noise from inflow process noise. The
-curvature of the objective in log-parameter space, and the correlations
-implied by its inverse, make such trade-offs visible. Terms held at a search
-bound are excluded: the optimum is not stationary in their direction, so
-curvature there says nothing about identifiability.
+curvature of the total negative log-likelihood in log-parameter space, and
+the correlations implied by its inverse, make such trade-offs visible. Terms
+held at a search bound are excluded: the optimum is not stationary in their
+direction, so curvature there says nothing about identifiability.
 """
 
 from __future__ import annotations
@@ -60,19 +60,20 @@ def _log_space_hessian(
 
 
 def _identifiability_report(
-    hessian: Array, names: Sequence[str], scored_components: int
+    hessian: Array, names: Sequence[str]
 ) -> tuple[pd.DataFrame, list[str]]:
     """Summarize how well the data pin down each log noise term.
 
-    The objective is a mean over ``scored_components`` observed innovation
-    components, so ``hessian * scored_components`` approximates the observed
-    Fisher information of the log parameters. Its inverse gives approximate
-    standard errors and correlations. They assume a correct Gaussian model;
-    heavy-tailed innovations make them optimistic.
+    ``hessian`` is taken of the total negative log-likelihood over every
+    scored component, not of the window-weighted objective, so it is the
+    observed Fisher information of the log parameters whatever the window
+    sizes and weights. Its inverse gives approximate standard errors and
+    correlations. They assume a correct Gaussian model; heavy-tailed
+    innovations make them optimistic.
     """
 
     names = list(names)
-    information = hessian * scored_components
+    information = np.asarray(hessian, dtype=float)
     frame = pd.DataFrame(np.nan, index=names, columns=["curvature", *names])
     frame.index.name = "parameter"
     frame["curvature"] = np.diag(hessian)
@@ -93,21 +94,37 @@ def _identifiability_report(
         ]
     else:
         # Without a positive-definite information matrix only each term's own
-        # curvature is usable, and correlations are unavailable.
+        # curvature is usable, and correlations are unavailable. Infinite
+        # curvature comes from a probe that failed the validity checks, so it
+        # says nothing about how well the term is identified.
         diagonal = np.diag(information)
         with np.errstate(divide="ignore", invalid="ignore"):
             log_standard_error = np.where(
-                diagonal > 0.0, 1.0 / np.sqrt(diagonal), np.inf
+                ~np.isfinite(diagonal),
+                np.nan,
+                np.where(diagonal > 0.0, 1.0 / np.sqrt(diagonal), np.inf),
             )
         warnings.append(
             "the objective is not strictly convex at the selected optimum, so "
             "parameter correlations are unavailable"
         )
+        unknown = [
+            name
+            for name, curvature in zip(names, diagonal, strict=True)
+            if not np.isfinite(curvature)
+        ]
+        if unknown:
+            warnings.insert(
+                0,
+                f"{', '.join(unknown)} could not be checked: a step of "
+                f"{_LOG_STEP:g} in log space reached noise settings that fail "
+                "the validity checks",
+            )
     frame.insert(1, "log_standard_error", log_standard_error)
     poorly_identified = [
         name
         for name, error in zip(names, log_standard_error, strict=True)
-        if not error <= _MAX_LOG_STANDARD_ERROR
+        if not np.isnan(error) and not error <= _MAX_LOG_STANDARD_ERROR
     ]
     if poorly_identified:
         warnings.insert(

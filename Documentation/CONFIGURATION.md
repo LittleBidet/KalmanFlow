@@ -120,8 +120,9 @@ For an offline proposal, use `tune_inflow_noise` with a fixed
 `inflow_increment_sd_seeds` are the starting points of a bounded
 maximum-likelihood search over the five diagonal covariance terms. Noise
 evaluation requires `q`, `r`, and `p0` to be diagonal. The search bounds are
-multiples of the base configuration's terms, so set its `q_inflow` to a
-realistic value. The tuner runs a causal chronology per evaluation and scores the joint
+multiples of the base configuration's terms, except `r_storage`, which by
+default is searched around an estimate from the data, so set the base
+`q_inflow` to a realistic value. The tuner runs a causal chronology per evaluation and scores the joint
 predictive innovation for whichever storage and outflow components are
 observed, before that row is assimilated. The returned configuration is
 proposed only; it is never persisted automatically. Supply a new

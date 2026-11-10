@@ -68,12 +68,15 @@ maximum-likelihood estimation. Only rows inside the declared windows, after
 warmup, contribute; earlier observations may still condition a window's
 starting state. Smoothed states are never used.
 
-Each seed gives one starting point: the base configuration's terms with
-`q_inflow` set from the seed. All starts are scored, and the best
-`local_searches` of them are refined with bounded L-BFGS-B in log-parameter
-space, each with at most `max_evaluations_per_search` objective evaluations.
-The valid local optimum with the lowest objective is proposed. Results are
-deterministic.
+Each seed gives one starting point: the base configuration's terms, with
+`q_inflow` set from the seed and, when the data give a storage-noise
+estimate (see below), `r_storage` set to that estimate. All starts are
+scored, and the best `local_searches` of them are refined with bounded
+L-BFGS-B in log-parameter space, each with at most
+`max_evaluations_per_search` objective evaluations.
+The valid local optimum with the lowest objective is proposed, unless the
+base configuration scores lower: then the proposal keeps the base terms and
+a warning says so. Results are deterministic.
 
 Pass `progress=callback` to follow a long run. The callback receives a
 `NoiseTuningProgress` at the start of each phase (`screening`, `search-1` and
@@ -82,8 +85,10 @@ so on, then `identifiability`) and after every filtering pass; each phase's
 finish early. Exceptions raised by the callback propagate and cancel the run.
 
 Each search bound is a multiple of the matching base term
-(`*_multiplier_bounds` in `NoiseTuningSettings`), so the base `q_inflow`
-must be realistic, and every seed must fall inside the `q_inflow` bounds. By
+(`*_multiplier_bounds` in `NoiseTuningSettings`), except that by default
+`r_storage` is searched around an estimate from the data, described below.
+The base `q_inflow` must therefore be realistic, and every seed must fall
+inside the `q_inflow` bounds. By
 default `q_storage` cannot exceed its reviewed base value: the innovation
 likelihood alone cannot tell a rapid inflow event from an over-dispersed
 storage channel. A selected term on a bound is reported, because the
@@ -124,10 +129,13 @@ Diagnostics never change the selection. The result reports:
   serially correlated innovation sequence fails these checks at any noise
   setting, which points at the model structure rather than the tuning.
 * **Identifiability.** For each selected term not on a bound: the curvature
-  of the objective in log space, an approximate standard error of the log
-  value, and the correlations implied by the inverse Hessian. Terms
+  of the total negative log-likelihood in log space, an approximate standard
+  error of the log value, and the correlations implied by the inverse
+  Hessian. Window weights and sizes do not change these figures. Terms
   uncertain by more than a factor of e, and pairs correlated beyond ±0.95,
-  are named in warnings. The standard errors assume a correct Gaussian model.
+  are named in warnings, and so is a term whose curvature could not be
+  measured because a nearby step failed the validity checks; its standard
+  error is NaN. The standard errors assume a correct Gaussian model.
   The check adds about 2n² objective evaluations for n free terms; disable it
   with `check_identifiability=False`.
 * **Search status.** Each local search's evaluation count, convergence flag,

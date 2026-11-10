@@ -85,6 +85,14 @@ def test_block_median_is_not_dragged_to_zero_by_a_storm() -> None:
     assert _storage_noise._storage_noise_warnings(frame) == []
 
 
+def test_window_named_all_is_rejected_instead_of_shadowing_the_pooled_row() -> None:
+    storage = _noisy_storage()
+    first, second = _halves(storage.index)
+    windows = (ValidationWindow("all", first.start, first.end), second)
+    with pytest.raises(ValueError, match="'all' is reserved"):
+        estimate_storage_noise(storage, windows)
+
+
 def test_estimate_without_windows_returns_only_the_pooled_row() -> None:
     storage = _noisy_storage()
     frame = estimate_storage_noise(storage)
@@ -232,6 +240,27 @@ def test_tuner_centers_r_storage_bounds_on_the_data_estimate() -> None:
         "all",
     ]
     assert not any("could not be estimated" in w for w in result.warnings)
+
+
+def test_tuner_rejects_a_window_named_all_before_filtering() -> None:
+    storage = _noisy_storage(count=600)
+    index = storage.index
+    windows = tuple(
+        ValidationWindow(name, index[rows[0]], index[rows[-1]] + pd.Timedelta("15min"))
+        for name, rows in zip(
+            ("all", "b", "c"), np.array_split(np.arange(len(index)), 3), strict=True
+        )
+    )
+    with pytest.raises(ValueError, match="'all' is reserved"):
+        tune_inflow_noise(
+            storage,
+            pd.Series(4.0, index=index),
+            _config(),
+            [2.0],
+            windows,
+            settings=NoiseEvaluationSettings(warmup=timedelta(0)),
+            proposed_configuration_version="config-v2",
+        )
 
 
 def test_tuner_keeps_configured_bounds_when_estimation_is_off() -> None:

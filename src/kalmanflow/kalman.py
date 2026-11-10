@@ -529,14 +529,6 @@ def _observation_at(value: np.ndarray, time_index: int) -> np.ndarray:
     return value if value.ndim == 2 else value[time_index]
 
 
-
-
-
-
-
-
-
-
 def _require_shape(
     array: np.ndarray, expected_shape: tuple[int, ...], name: str
 ) -> None:
@@ -558,8 +550,6 @@ def _require_no_infinity(array: np.ndarray, name: str) -> None:
 
     if np.isinf(array).any():
         raise ValueError(f"{name} must contain only finite values or NaN")
-
-
 
 
 def _require_covariance_stack(array: np.ndarray, name: str) -> None:

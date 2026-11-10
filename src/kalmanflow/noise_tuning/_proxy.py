@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -22,6 +22,17 @@ def _correlation(left: Array, right: Array) -> float:
     if np.std(left) <= np.finfo(float).eps or np.std(right) <= np.finfo(float).eps:
         return np.nan
     return float(np.corrcoef(left, right)[0, 1])
+
+
+def _validate_proxy(upstream_proxy: object) -> None:
+    """Check the proxy's type and index, so a bad proxy fails before tuning."""
+
+    if not isinstance(upstream_proxy, pd.Series):
+        raise TypeError("upstream_proxy must be a pandas Series or None")
+    if not isinstance(upstream_proxy.index, pd.DatetimeIndex):
+        raise TypeError("upstream_proxy must use a pandas DatetimeIndex")
+    if upstream_proxy.index.tz is None:
+        raise ValueError("upstream_proxy index must be timezone-aware")
 
 
 def _proxy_metrics(
@@ -55,14 +66,9 @@ def _proxy_metrics(
         metrics["proxy_available"] = True
         metrics["proxy_check_passed"] = False
         return metrics
-    if not isinstance(upstream_proxy, pd.Series):
-        raise TypeError("upstream_proxy must be a pandas Series or None")
-    if not isinstance(upstream_proxy.index, pd.DatetimeIndex):
-        raise TypeError("upstream_proxy must use a pandas DatetimeIndex")
-    if upstream_proxy.index.tz is None:
-        raise ValueError("upstream_proxy index must be timezone-aware")
+    _validate_proxy(upstream_proxy)
     proxy = upstream_proxy.copy()
-    proxy.index = proxy.index.tz_convert("UTC")
+    proxy.index = cast(pd.DatetimeIndex, proxy.index).tz_convert("UTC")
     proxy = proxy[~proxy.index.duplicated(keep="last")].sort_index()
     aligned_proxy = pd.to_numeric(proxy.reindex(prepared.timestamps), errors="coerce")
     estimate = np.asarray(result.filtered_means[:, 1], dtype=float)

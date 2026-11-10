@@ -415,3 +415,20 @@ def test_pandas_wrapper_forwards_all_model_options(
         "max_window_steps": 37,
         "include_uncertainty": True,
     }
+
+
+def test_inflow_standard_deviation_tolerance_follows_the_shared_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import kalmanflow.core as core
+
+    # -1e-13 is within the default relative tolerance of 1e-12.
+    covariance = np.diag([1.0, -1e-13, 1.0])
+    assert core._inflow_standard_deviation(covariance, name="covariance") == 0.0
+    monkeypatch.setattr(core, "COVARIANCE_PSD_RTOL", 1e-14)
+    for compute in (
+        lambda: core._inflow_standard_deviation(covariance, name="covariance"),
+        lambda: core._inflow_standard_deviations(covariance[None], name="covariance"),
+    ):
+        with pytest.raises(ValueError, match="materially negative"):
+            compute()
