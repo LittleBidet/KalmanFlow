@@ -536,8 +536,14 @@ def _candidate_row(
 def _improvement_over_base(
     objective: _Objective, base: _Candidate, selected: _Candidate
 ) -> tuple[float, float]:
-    """Return the weighted per-window NLPD gain over base and its paired SE."""
+    """Return the weighted per-window NLPD gain over base and its paired SE.
 
+    A base that fails the hard validity checks has no comparable score, even
+    when its per-window losses are finite, so the gain is unknown.
+    """
+
+    if not np.isfinite(objective.score(base.result)):
+        return np.nan, np.nan
     differences = objective.window_losses(base.result) - objective.window_losses(
         selected.result
     )
