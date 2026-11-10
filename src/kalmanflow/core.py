@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 import math
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum, auto
 from statistics import NormalDist
-from typing import Final
+from typing import Final, SupportsFloat, cast
 
 import numpy as np
 import pandas
@@ -69,7 +69,7 @@ def _validated_interval_level(level: object) -> float:
     """Return a finite central interval level strictly inside (0, 1)."""
 
     try:
-        value = float(level)
+        value = float(cast(SupportsFloat, level))
     except (TypeError, ValueError) as error:
         raise ValueError(
             "level must be finite and strictly between 0 and 1"
@@ -902,7 +902,7 @@ def _run_batch(
 
 
 def _process_reservoir_batch_raw(
-    index: pandas.DatetimeIndex,
+    index: pandas.Index,
     storage: np.ndarray,
     discharge: np.ndarray,
     *,
@@ -938,7 +938,7 @@ def _process_reservoir_batch_raw(
         len(index), include_uncertainty=include_uncertainty
     )
     first, second = _initialization_positions(storage, discharge)
-    if second is None:
+    if first is None or second is None:
         return pandas.DataFrame(result, index=index)
 
     positions = np.concatenate(
@@ -1048,7 +1048,7 @@ def _initialization_positions(
 
 
 def _batch_timestamp_microseconds(
-    timestamps: pandas.DatetimeIndex,
+    timestamps: pandas.Index,
 ) -> np.ndarray | None:
     """Use exact microseconds where the original timestamp range permits it."""
 
@@ -1065,7 +1065,7 @@ def _batch_timestamp_microseconds(
 
 
 def _batch_elapsed_seconds(
-    timestamps: pandas.DatetimeIndex, timestamp_us: np.ndarray | None
+    timestamps: pandas.Index, timestamp_us: np.ndarray | None
 ) -> np.ndarray:
     """Vectorize pandas' whole-seconds-plus-microseconds conversion order.
 
@@ -1086,7 +1086,7 @@ def _batch_elapsed_seconds(
     return seconds + microseconds / 1_000_000
 
 
-def _validate_batch_timestamps(index: pandas.DatetimeIndex) -> None:
+def _validate_batch_timestamps(index: pandas.Index) -> None:
     """Apply the streaming timestamp contract before batch computation."""
 
     if (
@@ -1113,7 +1113,7 @@ def _write_fixed_lag_inflow_revisions(
     result: dict[str, np.ndarray],
     *,
     positions: np.ndarray,
-    timestamps: pandas.DatetimeIndex,
+    timestamps: pandas.Index,
     timestamp_us: np.ndarray | None,
     filtered,
     prediction_flags: np.ndarray,
@@ -1137,25 +1137,21 @@ def _write_fixed_lag_inflow_revisions(
             lag_us = smoothing_lag // timedelta(microseconds=1)
         except pandas.errors.OutOfBoundsTimedelta:
             timestamp_us = None
-    active: deque[int] = deque()
-    for current in range(len(timestamps)):
+    microseconds = timestamp_us
+
+    def lag_passed_at(current: int) -> Callable[[int], bool]:
         # Same release rule as OnlineFixedLagRTS.add_step, with exact
         # microsecond arithmetic where the index range allows it.
-        if timestamp_us is None:
-            eligible = _release_count(
-                active,
-                lambda candidate, current=current: (
-                    timestamps[current] - timestamps[candidate] >= smoothing_lag
-                ),
+        if microseconds is None:
+            return lambda candidate: (
+                timestamps[current] - timestamps[candidate] >= smoothing_lag
             )
-        else:
-            now_us = int(timestamp_us[current])
-            eligible = _release_count(
-                active,
-                lambda candidate, now_us=now_us: (
-                    now_us - int(timestamp_us[candidate]) >= lag_us
-                ),
-            )
+        now_us = int(microseconds[current])
+        return lambda candidate: now_us - int(microseconds[candidate]) >= lag_us
+
+    active: deque[int] = deque()
+    for current in range(len(timestamps)):
+        eligible = _release_count(active, lag_passed_at(current))
         _require_release_or_room(eligible, len(active), max_window_steps)
         if not eligible:
             active.append(current)

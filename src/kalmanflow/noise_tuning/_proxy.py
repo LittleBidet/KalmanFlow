@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -68,7 +68,7 @@ def _proxy_metrics(
         return metrics
     _validate_proxy(upstream_proxy)
     proxy = upstream_proxy.copy()
-    proxy.index = proxy.index.tz_convert("UTC")
+    proxy.index = cast(pd.DatetimeIndex, proxy.index).tz_convert("UTC")
     proxy = proxy[~proxy.index.duplicated(keep="last")].sort_index()
     aligned_proxy = pd.to_numeric(proxy.reindex(prepared.timestamps), errors="coerce")
     estimate = np.asarray(result.filtered_means[:, 1], dtype=float)

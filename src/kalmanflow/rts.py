@@ -6,6 +6,7 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import cast
 
 import numpy as np
 
@@ -240,8 +241,8 @@ class OnlineFixedLagRTS:
     def max_window_steps(self) -> int:
         """The maximum number of filter steps kept in memory."""
 
-        maxlen = self._steps.maxlen
-        return int(maxlen)
+        # The deque is always created with a maxlen.
+        return int(cast(int, self._steps.maxlen))
 
     @property
     def last_finalized_steps(self) -> tuple[FilterStep, ...]:
@@ -289,7 +290,8 @@ class OnlineFixedLagRTS:
             return ()
 
         active = (*self._steps, step)
-        gains = (*self._gains, gain)
+        # A releasing step always follows an active one, so its gain exists.
+        gains = (*self._gains, cast(Array, gain))
         smoothed = _smooth_filter_steps(active, gains=np.stack(gains))
         finalized = smoothed[:eligible_count]
         self._last_finalized_steps = active[:eligible_count]

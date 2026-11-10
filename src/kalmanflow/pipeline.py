@@ -13,8 +13,18 @@ from ._validation import bounded_integer, measurement_value
 from .observations import Observation
 from .time_utils import aware_timestamp, to_utc
 
-FilterStep = TypeVar("FilterStep")
+
+class _Timestamped(Protocol):
+    """Anything the pipeline orders by time: a filter step has a timestamp."""
+
+    @property
+    def timestamp(self) -> datetime: ...
+
+
+FilterStep = TypeVar("FilterStep", bound=_Timestamped)
 SmoothedState = TypeVar("SmoothedState")
+# A smoother only returns smoothed states, so its protocol is covariant in them.
+SmoothedState_co = TypeVar("SmoothedState_co", covariant=True)
 
 _FAILED_PIPELINE_MESSAGE = (
     "pipeline failed after its smoothing window changed; "
@@ -111,7 +121,7 @@ class PipelineBackend(Protocol[FilterStep]):
         """Return one forward step after ``previous``."""
 
 
-class PipelineSmoother(Protocol[FilterStep, SmoothedState]):
+class PipelineSmoother(Protocol[FilterStep, SmoothedState_co]):
     """Smoother that releases estimates after a chosen delay."""
 
     @property
@@ -122,13 +132,13 @@ class PipelineSmoother(Protocol[FilterStep, SmoothedState]):
     def pending_count(self) -> int:
         """Number of active, not finalized filter steps."""
 
-    def add_step(self, step: FilterStep) -> tuple[SmoothedState, ...]:
+    def add_step(self, step: FilterStep) -> tuple[SmoothedState_co, ...]:
         """Add a forward step and return newly finalized states.
 
         An implementation that raises must leave its window unchanged.
         """
 
-    def provisional(self) -> tuple[SmoothedState, ...]:
+    def provisional(self) -> tuple[SmoothedState_co, ...]:
         """Return smoothed states currently in the active lag window."""
 
     def active_steps(self) -> tuple[FilterStep, ...]:
@@ -163,7 +173,7 @@ class PipelineUpdate[FilterStep, SmoothedState]:
     smoothed_states: tuple[SmoothedState, ...]
 
 
-class OnlineInflowPipeline:
+class OnlineInflowPipeline[FilterStep: _Timestamped, SmoothedState]:
     """Coordinate incoming observations, filtering, and delayed smoothing.
 
     The pipeline handles timestamp ordering, two-observation initialization,
@@ -337,7 +347,9 @@ class OnlineInflowPipeline:
                     else PipelineInitializationPhase.WAITING_FOR_SECOND
                 ),
                 last_input_timestamp=phase.last_input_timestamp,
-                initial_observation=None if waiting_for_first else phase.first,
+                initial_observation=(
+                    phase.first if isinstance(phase, _WaitingForSecond) else None
+                ),
                 filter_anchor=None,
                 unfinished_observations=(),
             )
@@ -507,7 +519,9 @@ class OnlineInflowPipeline:
             ) <= to_utc(previous_timestamp):
                 raise ValueError("replay observations must be strictly increasing")
             previous_timestamp = observation.timestamp
-        if to_utc(previous_timestamp) != to_utc(state.last_input_timestamp):
+        # The replay list is nonempty, so the loop has set previous_timestamp.
+        last_replayed = cast(datetime, previous_timestamp)
+        if to_utc(last_replayed) != to_utc(state.last_input_timestamp):
             raise ValueError("last input timestamp does not match replay observations")
         return phase
 

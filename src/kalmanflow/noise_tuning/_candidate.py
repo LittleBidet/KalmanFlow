@@ -98,10 +98,10 @@ def _evaluate_candidate(
     # Rows that need regularization, or cannot be scored, keep the scalar
     # path, so their jitter and failure reasons are unchanged.
     regularization_count = 0
-    for row in np.flatnonzero(finite.any(axis=1) & ~clean):
+    for row in np.flatnonzero(finite.any(axis=1) & ~clean).tolist():
         regularization_count += _score_row(
             diagnostics,
-            int(row),
+            row,
             prepared.timestamps[row],
             finite[row],
             innovations[row],

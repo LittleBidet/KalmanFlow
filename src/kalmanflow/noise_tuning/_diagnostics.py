@@ -72,14 +72,18 @@ def _storage_conditional_nlpd(
 
 def _elapsed_lag_autocorrelation(
     timestamps: Sequence[datetime] | pd.DatetimeIndex,
-    values: Sequence[float],
+    values: Sequence[float] | Array,
     max_lag: timedelta,
     *,
     lag_tolerance: timedelta | None = None,
 ) -> pd.DataFrame:
     """Calculate pairwise innovation autocorrelation in elapsed-time bins."""
 
-    index = _validate_index(pd.DatetimeIndex(timestamps))
+    index = _validate_index(
+        timestamps
+        if isinstance(timestamps, pd.DatetimeIndex)
+        else pd.DatetimeIndex(list(timestamps))
+    )
     series = np.asarray(values, dtype=float)
     if series.shape != (len(index),):
         raise ValueError("values must match timestamps")
@@ -161,13 +165,13 @@ def _elapsed_lag_autocorrelation(
     centered = finite_values - centre
     rows = []
     for target in targets:
-        lower = np.searchsorted(
+        first_match = np.searchsorted(
             finite_seconds, finite_seconds + target - tolerance, side="left"
         )
-        upper = np.searchsorted(
+        after_last_match = np.searchsorted(
             finite_seconds, finite_seconds + target + tolerance, side="right"
         )
-        counts = np.maximum(upper - lower, 0)
+        counts = np.maximum(after_last_match - first_match, 0)
         total = int(counts.sum())
         pair_count = 0
         covariance = 0.0
@@ -178,7 +182,7 @@ def _elapsed_lag_autocorrelation(
                 starts = np.cumsum(counts) - counts
                 source = np.repeat(np.arange(len(finite_seconds)), counts)
                 local = np.arange(total) - np.repeat(starts, counts)
-                matching = np.repeat(lower, counts) + local
+                matching = np.repeat(first_match, counts) + local
                 valid = matching > source
                 pair_count = int(np.sum(valid))
                 source_values = centered[source[valid]]
@@ -196,7 +200,7 @@ def _elapsed_lag_autocorrelation(
                     starts = np.cumsum(chunk_counts) - chunk_counts
                     source = np.repeat(np.arange(begin, end), chunk_counts)
                     local = np.arange(chunk_total) - np.repeat(starts, chunk_counts)
-                    matching = np.repeat(lower[begin:end], chunk_counts) + local
+                    matching = np.repeat(first_match[begin:end], chunk_counts) + local
                     valid = matching > source
                     pair_count += int(np.sum(valid))
                     source_values = centered[source[valid]]
