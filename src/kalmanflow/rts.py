@@ -88,19 +88,11 @@ def _rts_smooth_arrays(
         if gains is None
         else gains
     )
-    if gains.shape != (n_times - 1, n_state, n_state):
-        raise ValueError("gains has an incompatible shape")
-
-    smoothed_means = np.empty_like(filtered_means)
+    smoothed_means = _rts_smooth_means(filtered_means, predicted_means, gains)
     smoothed_covariances = np.empty_like(filtered_covariances)
-    smoothed_means[-1] = filtered_means[-1]
     smoothed_covariances[-1] = filtered_covariances[-1]
-
     for k in range(n_times - 2, -1, -1):
         gain = gains[k]
-        smoothed_means[k] = filtered_means[k] + gain @ (
-            smoothed_means[k + 1] - predicted_means[k + 1]
-        )
         smoothed_covariances[k] = _symmetrize(
             filtered_covariances[k]
             + gain
@@ -114,7 +106,12 @@ def _rts_smooth_arrays(
 def _rts_smooth_means(
     filtered_means: Array, predicted_means: Array, gains: Array
 ) -> Array:
-    """Smooth a nonempty batch window without unused covariance recursion."""
+    """Run the RTS mean recursion over a nonempty window.
+
+    This is the only copy of the mean recursion: :func:`_rts_smooth_arrays`
+    calls it and adds the covariance recursion, and the batch path calls it
+    alone when uncertainty is not requested.
+    """
 
     n_times, n_state = filtered_means.shape
     if gains.shape != (max(n_times - 1, 0), n_state, n_state):
