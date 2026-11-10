@@ -10,7 +10,7 @@ standard deviations are needed. A checkpoint restores model state only; the
 caller chooses the uncertainty output option again with
 `from_checkpoint(..., include_uncertainty=...)`.
 
-`OnlineReservoirInflow.process` accepts either an `Observation` or `timestamp`, `storage`, and `discharge` keywords. Timestamps must be timezone-aware, no finer than microseconds, and strictly later than the previously accepted observation. All elapsed-time comparisons are normalized to UTC. Validation-window boundaries may retain nanosecond precision because they are interval labels rather than observations.
+`OnlineReservoirInflow.process` takes one `Observation`, or any object with `timestamp`, `storage`, and `discharge` attributes. Timestamps must be timezone-aware, no finer than microseconds, and strictly later than the previously accepted observation. All elapsed-time comparisons are normalized to UTC. Validation-window boundaries may retain nanosecond precision because they are interval labels rather than observations.
 
 The package intentionally does not sort, align, deduplicate, interpolate, or impute inputs.
 
