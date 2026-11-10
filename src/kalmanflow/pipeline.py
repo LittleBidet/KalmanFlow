@@ -172,7 +172,9 @@ class OnlineInflowPipeline:
     A call that raises before the smoother accepts a step leaves the pipeline
     unchanged. A call that raises afterwards cannot be undone, so the pipeline
     becomes :attr:`failed` and rejects further use until
-    :meth:`restore_state` replaces its state.
+    :meth:`restore_state` replaces its state. An interrupt such as
+    ``KeyboardInterrupt`` while a step is being added also fails the
+    pipeline, because the smoother may already have changed.
     """
 
     def __init__(
@@ -573,7 +575,10 @@ class OnlineInflowPipeline:
 
         Returns the newly finalized states and the last step they finalized,
         if any. Once the smoother has accepted a step, a later failure cannot
-        be undone, so the pipeline moves to its failed phase.
+        be undone, so the pipeline moves to its failed phase. An ordinary
+        exception from ``add_step`` leaves the smoother unchanged, but an
+        interrupt such as ``KeyboardInterrupt`` can arrive after the smoother
+        changed and before ``accepted`` is set, so it also fails the pipeline.
         """
 
         finalized: list[SmoothedState] = []
@@ -593,8 +598,8 @@ class OnlineInflowPipeline:
                     anchor = released_steps[-1]
                     del self._unfinished_observations[: len(released_steps)]
                 finalized.extend(released)
-        except BaseException:
-            if accepted:
+        except BaseException as error:
+            if accepted or not isinstance(error, Exception):
                 self._phase = _Failed()
             raise
         return tuple(finalized), anchor

@@ -242,6 +242,30 @@ def test_pipeline_rejected_step_before_acceptance_changes_nothing() -> None:
     assert pipeline.export_state() == before
 
 
+def test_interrupt_after_the_smoother_accepts_a_step_fails_the_stream() -> None:
+    stream = OnlineReservoirInflow.from_config(_config())
+    observations = _observations(3)
+    stream.process(observations[0])
+    stream.process(observations[1])
+    smoother = stream._pipeline._smoother
+    real_add_step = smoother.add_step
+
+    def add_then_interrupt(step):
+        # The smoother has changed; the interrupt lands before the pipeline
+        # records that it accepted the step.
+        real_add_step(step)
+        raise KeyboardInterrupt
+
+    smoother.add_step = add_then_interrupt
+    with pytest.raises(KeyboardInterrupt):
+        stream.process(observations[2])
+
+    assert stream._pipeline.failed
+    assert stream.failed
+    with pytest.raises(RuntimeError, match="restore"):
+        stream.checkpoint()
+
+
 def test_pipeline_initialization_failure_after_first_step_is_terminal() -> None:
     pipeline = OnlineInflowPipeline(_Backend(), _RejectingSmoother(reject_call=2))
     pipeline.process(timestamp=START, storage=100.0, discharge=4.0)
