@@ -149,7 +149,9 @@ def test_vector_elapsed_preserves_pandas_rounding_for_large_intervals():
     expected = np.asarray(
         [(b - a).total_seconds() for a, b in zip(index[:-1], index[1:], strict=True)]
     )
-    actual = core._batch_elapsed_seconds(index)
+    actual = core._batch_elapsed_seconds(
+        index, core._batch_timestamp_microseconds(index)
+    )
     assert actual.tobytes() == expected.tobytes()
 
 
@@ -194,7 +196,8 @@ def test_microsecond_conversion_empty_singleton_and_overflow_fallback():
         pd.DatetimeIndex([], tz="UTC"),
         pd.date_range("2024-01-01", periods=1, tz="UTC"),
     ):
-        assert core._batch_elapsed_seconds(index).shape == (0,)
+        microseconds = core._batch_timestamp_microseconds(index)
+        assert core._batch_elapsed_seconds(index, microseconds).shape == (0,)
     values = np.array([-5 * 10**18, 5 * 10**18], dtype=np.int64)
     index = pd.DatetimeIndex(values.view("datetime64[us]"), tz="UTC")
     # Preserve pandas' subtraction exception for a span beyond its resolution.
@@ -203,8 +206,33 @@ def test_microsecond_conversion_empty_singleton_and_overflow_fallback():
     ) as original:
         index[1] - index[0]
     with pytest.raises(type(original.value)) as actual:
-        core._batch_elapsed_seconds(index)
+        core._batch_elapsed_seconds(index, core._batch_timestamp_microseconds(index))
     assert str(actual.value) == str(original.value)
+
+
+def test_batch_converts_timestamps_to_microseconds_once(monkeypatch):
+    index = pd.date_range("2024-01-01", periods=6, freq="15min", tz="UTC")
+    calls = 0
+    real = core._batch_timestamp_microseconds
+
+    def counting(timestamps):
+        nonlocal calls
+        calls += 1
+        return real(timestamps)
+
+    monkeypatch.setattr(core, "_batch_timestamp_microseconds", counting)
+    output = get_reservoir_inflow(
+        pd.Series(100.0 + np.arange(6), index=index),
+        pd.Series(4.0, index=index),
+        0.002,
+        1.0,
+        0.02,
+        0.25,
+        4.0,
+        smoothing_lag=timedelta(minutes=30),
+    )
+    assert calls == 1
+    assert output.revised_inflow.notna().sum() == 4
 
 
 def test_regular_cadence_constructs_only_one_distinct_matrix_pair(monkeypatch):

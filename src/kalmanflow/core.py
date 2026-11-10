@@ -939,7 +939,8 @@ def _process_reservoir_batch_raw(
     )
     timestamps = index[positions]
     observations = np.column_stack((storage[positions], discharge[positions]))
-    elapsed = _batch_elapsed_seconds(timestamps)
+    timestamp_us = _batch_timestamp_microseconds(timestamps)
+    elapsed = _batch_elapsed_seconds(timestamps, timestamp_us)
     distinct_elapsed, inverse = np.unique(elapsed, return_inverse=True)
     transitions = np.asarray(
         [backend.model.transition_matrix(seconds) for seconds in distinct_elapsed],
@@ -981,6 +982,7 @@ def _process_reservoir_batch_raw(
         result,
         positions=positions,
         timestamps=timestamps,
+        timestamp_us=timestamp_us,
         filtered=filtered,
         prediction_flags=prediction_flags,
         smoothing_lag=smoothing_lag,
@@ -1055,10 +1057,15 @@ def _batch_timestamp_microseconds(
     return values
 
 
-def _batch_elapsed_seconds(timestamps: pandas.DatetimeIndex) -> np.ndarray:
-    """Vectorize pandas' whole-seconds-plus-microseconds conversion order."""
+def _batch_elapsed_seconds(
+    timestamps: pandas.DatetimeIndex, timestamp_us: np.ndarray | None
+) -> np.ndarray:
+    """Vectorize pandas' whole-seconds-plus-microseconds conversion order.
 
-    timestamp_us = _batch_timestamp_microseconds(timestamps)
+    ``timestamp_us`` is :func:`_batch_timestamp_microseconds` of
+    ``timestamps``, computed once per batch call by the caller.
+    """
+
     if timestamp_us is None:
         return np.asarray(
             [
@@ -1100,6 +1107,7 @@ def _write_fixed_lag_inflow_revisions(
     *,
     positions: np.ndarray,
     timestamps: pandas.DatetimeIndex,
+    timestamp_us: np.ndarray | None,
     filtered,
     prediction_flags: np.ndarray,
     smoothing_lag: timedelta,
@@ -1114,11 +1122,8 @@ def _write_fixed_lag_inflow_revisions(
         filtered.transition_matrices,
     )
     # Pandas lags may carry sub-microsecond remainders or wider resolutions.
-    timestamp_us = (
-        None
-        if getattr(smoothing_lag, "nanoseconds", 0)
-        else _batch_timestamp_microseconds(timestamps)
-    )
+    if getattr(smoothing_lag, "nanoseconds", 0):
+        timestamp_us = None
     lag_us = 0
     if timestamp_us is not None:
         try:
