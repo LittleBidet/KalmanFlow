@@ -28,6 +28,8 @@ from .reservoir_backend import ReservoirBackend
 from .reservoir_config import ReservoirConfig
 from .rts import (
     OnlineFixedLagRTS,
+    _release_count,
+    _require_release_or_room,
     _rts_gains,
     _rts_smooth_arrays,
     _rts_smooth_means,
@@ -1137,23 +1139,25 @@ def _write_fixed_lag_inflow_revisions(
             timestamp_us = None
     active: deque[int] = deque()
     for current in range(len(timestamps)):
-        eligible = 0
-        for candidate in active:
-            ready = (
-                timestamps[current] - timestamps[candidate] >= smoothing_lag
-                if timestamp_us is None
-                else int(timestamp_us[current]) - int(timestamp_us[candidate]) >= lag_us
+        # Same release rule as OnlineFixedLagRTS.add_step, with exact
+        # microsecond arithmetic where the index range allows it.
+        if timestamp_us is None:
+            eligible = _release_count(
+                active,
+                lambda candidate, current=current: (
+                    timestamps[current] - timestamps[candidate] >= smoothing_lag
+                ),
             )
-            if ready:
-                eligible += 1
-            else:
-                break
+        else:
+            now_us = int(timestamp_us[current])
+            eligible = _release_count(
+                active,
+                lambda candidate, now_us=now_us: (
+                    now_us - int(timestamp_us[candidate]) >= lag_us
+                ),
+            )
+        _require_release_or_room(eligible, len(active), max_window_steps)
         if not eligible:
-            if len(active) == max_window_steps:
-                raise OverflowError(
-                    "active RTS window reached max_window_steps before "
-                    "a state finalized"
-                )
             active.append(current)
             continue
 

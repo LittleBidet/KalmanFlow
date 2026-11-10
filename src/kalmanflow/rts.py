@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -172,6 +172,36 @@ def _smooth_filter_steps(
     )
 
 
+def _release_count[Step](
+    active: Iterable[Step], lag_passed: Callable[[Step], bool]
+) -> int:
+    """Count the oldest active steps whose smoothing lag has passed.
+
+    This is the release rule shared by :class:`OnlineFixedLagRTS` and the
+    batch adapter; each supplies its own elapsed-time comparison. Active
+    steps are in time order, so the scan stops at the first one still
+    inside the lag.
+    """
+
+    count = 0
+    for candidate in active:
+        if not lag_passed(candidate):
+            break
+        count += 1
+    return count
+
+
+def _require_release_or_room(
+    released: int, active_count: int, max_window_steps: int
+) -> None:
+    """Reject a step that would grow a full window without releasing any."""
+
+    if released == 0 and active_count == max_window_steps:
+        raise OverflowError(
+            "active RTS window reached max_window_steps before a state finalized"
+        )
+
+
 class OnlineFixedLagRTS:
     """Keep recent filter steps until their smoothed results are ready.
 
@@ -230,20 +260,17 @@ class OnlineFixedLagRTS:
         if self._steps and to_utc(step.timestamp) <= to_utc(self._steps[-1].timestamp):
             raise ValueError("filter-step timestamps must be strictly increasing")
         lag_seconds = self._lag.total_seconds()
-        eligible_count = 0
         # The new step has age zero and cannot finalize under a positive lag.
-        for active_step in self._steps:
-            if (
-                elapsed_seconds(step.timestamp, active_step.timestamp, allow_zero=True)
-                >= lag_seconds
-            ):
-                eligible_count += 1
-            else:
-                break
-        if eligible_count == 0 and len(self._steps) == self.max_window_steps:
-            raise OverflowError(
-                "active RTS window reached max_window_steps before a state finalized"
+        eligible_count = _release_count(
+            self._steps,
+            lambda active_step: elapsed_seconds(
+                step.timestamp, active_step.timestamp, allow_zero=True
             )
+            >= lag_seconds,
+        )
+        _require_release_or_room(
+            eligible_count, len(self._steps), self.max_window_steps
+        )
 
         # Compute before mutating either deque. A releasing full window needs
         # its complete gain sequence until smoothing has succeeded.
