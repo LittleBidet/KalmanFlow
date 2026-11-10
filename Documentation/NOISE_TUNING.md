@@ -135,7 +135,10 @@ Diagnostics never change the selection. The result reports:
   uncertain by more than a factor of e, and pairs correlated beyond ±0.95,
   are named in warnings, and so is a term whose curvature could not be
   measured because a nearby step failed the validity checks; its standard
-  error is NaN. The standard errors assume a correct Gaussian model.
+  error is NaN. A failed cross probe names the affected pair and makes
+  correlations unavailable; finite single-term curvatures still provide the
+  diagonal-only standard-error estimates. A failed probe does not establish
+  non-convexity. The standard errors assume a correct Gaussian model.
   The check adds about 2n² objective evaluations for n free terms; disable it
   with `check_identifiability=False`.
 * **Search status.** Each local search's evaluation count, convergence flag,

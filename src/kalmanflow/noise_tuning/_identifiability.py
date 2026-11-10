@@ -78,7 +78,8 @@ def _identifiability_report(
     frame.index.name = "parameter"
     frame["curvature"] = np.diag(hessian)
     warnings = []
-    positive_definite = np.isfinite(information).all() and (
+    finite = np.isfinite(information)
+    positive_definite = finite.all() and (
         float(np.min(np.linalg.eigvalsh(information))) > 0.0
     )
     if positive_definite:
@@ -104,14 +105,20 @@ def _identifiability_report(
                 np.nan,
                 np.where(diagonal > 0.0, 1.0 / np.sqrt(diagonal), np.inf),
             )
-        warnings.append(
-            "the objective is not strictly convex at the selected optimum, so "
-            "parameter correlations are unavailable"
-        )
+        if finite.all():
+            warnings.append(
+                "the objective is not strictly convex at the selected optimum, so "
+                "parameter correlations are unavailable"
+            )
         unknown = [
             name
             for name, curvature in zip(names, diagonal, strict=True)
             if not np.isfinite(curvature)
+        ]
+        unknown += [
+            f"{names[i]} and {names[j]}"
+            for i, j in combinations(range(len(names)), 2)
+            if not finite[i, j] or not finite[j, i]
         ]
         if unknown:
             warnings.insert(
