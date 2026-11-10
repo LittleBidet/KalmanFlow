@@ -120,15 +120,20 @@ class _ProgressReporter:
         self._limit = 0
         self._evaluations = 0
         self._best = np.inf
+        self._proposable = True
 
-    def start_phase(self, phase: str, limit: int) -> None:
+    def start_phase(self, phase: str, limit: int, *, proposable: bool = True) -> None:
+        """Begin a phase; passes in a non-proposable one leave the best alone."""
+
         self._phase, self._limit, self._evaluations = phase, limit, 0
+        self._proposable = proposable
         self._phase_number += 1
         self._emit()
 
     def evaluated(self, score: float) -> None:
         self._evaluations += 1
-        self._best = min(self._best, score)
+        if self._proposable:
+            self._best = min(self._best, score)
         self._emit()
 
     def _emit(self) -> None:
@@ -489,7 +494,9 @@ def _check_identifiability(
     if not free:
         return pd.DataFrame(), []
     # A central-difference Hessian over n terms needs 2n² points plus the center.
-    objective.progress.start_phase("identifiability", 2 * len(free) ** 2 + 1)
+    objective.progress.start_phase(
+        "identifiability", 2 * len(free) ** 2 + 1, proposable=False
+    )
     hessian = _identifiability._log_space_hessian(
         objective.total, selected.parameters, free
     )

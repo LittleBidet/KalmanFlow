@@ -299,6 +299,9 @@ class NoiseTuningProgress:
     ``phase_number`` counts from 1 to ``phase_count``. The identifiability
     phase is counted when the check is enabled but skipped when every term
     ends on a search bound, so the run can finish one phase early.
+    ``best_objective`` is the lowest objective of any screening or search
+    pass so far, the base configuration included. Identifiability passes are
+    not counted, because their perturbed settings are never proposed.
     """
 
     phase: str

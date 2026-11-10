@@ -1100,6 +1100,16 @@ def test_progress_reports_each_filter_pass_by_phase(
     assert elapsed == sorted(elapsed)
 
 
+def test_final_best_objective_is_the_selected_objective() -> None:
+    # With 30 evaluations per search, a perturbation in the identifiability
+    # phase scores below the selected optimum on this data.
+    storage, discharge, windows = _inputs()
+    updates: list[NoiseTuningProgress] = []
+    result = _tune(storage, discharge, windows, progress=updates.append)
+    assert updates[-1].phase == "identifiability"
+    assert updates[-1].best_objective == result.selected_objective
+
+
 def test_progress_has_no_identifiability_phase_when_the_check_is_off() -> None:
     storage, discharge, windows = _inputs()
     updates: list[NoiseTuningProgress] = []
