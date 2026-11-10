@@ -389,7 +389,9 @@ def tune_inflow_noise(
         base_objective=base_objective,
         improvement_standard_error=improvement_error,
         candidate_summary=summary,
-        window_diagnostics=_window_frame((base, selected), windows),
+        window_diagnostics=_window_frame(
+            (base,) if selected is base else (base, selected), windows
+        ),
         identifiability=identifiability,
         storage_noise=storage_noise,
         proxy_diagnostics=proxy_frame,

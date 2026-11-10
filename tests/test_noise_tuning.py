@@ -566,6 +566,7 @@ def test_base_is_kept_when_every_search_stops_at_worse_settings(
         "base"
     )
     assert any("keeps the base noise terms" in w for w in result.warnings)
+    assert result.window_diagnostics["candidate"].tolist() == ["base"] * len(windows)
     assert not any("did not converge" in w for w in result.warnings)
     assert not any("not clearly better" in w for w in result.warnings)
 
