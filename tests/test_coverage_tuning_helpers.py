@@ -441,7 +441,24 @@ def test_identifiability_report_treats_infinite_curvature_as_unknown() -> None:
     )
     assert warnings[0].startswith("q_inflow could not be checked")
     assert not any("poorly identified" in warning for warning in warnings)
-    assert any("not strictly convex" in warning for warning in warnings)
+    assert not any("not strictly convex" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize("failed_probe", [np.nan, np.inf, -np.inf])
+def test_identifiability_report_names_unmeasured_cross_probes(failed_probe) -> None:
+    names = ["q_inflow", "r_storage", "q_outflow"]
+    hessian = np.array(
+        [[50.0, failed_probe, 0.0], [failed_probe, 80.0, 0.0], [0.0, 0.0, 20.0]]
+    )
+    frame, warnings = _identifiability._identifiability_report(hessian, names)
+    assert frame["curvature"].tolist() == [50.0, 80.0, 20.0]
+    np.testing.assert_allclose(frame["log_standard_error"], 1 / np.sqrt([50, 80, 20]))
+    assert frame[names].isna().all().all()
+    assert len(warnings) == 1
+    assert "q_inflow and r_storage" in warnings[0]
+    assert "could not be checked" in warnings[0]
+    assert "q_outflow" not in warnings[0]
+    assert "not strictly convex" not in warnings[0]
 
 
 def test_log_space_hessian_matches_a_known_quadratic() -> None:
